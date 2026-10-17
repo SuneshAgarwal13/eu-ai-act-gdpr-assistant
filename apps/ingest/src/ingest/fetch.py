@@ -9,7 +9,7 @@ CELLAR_URL_TEMPLATE = "http://publications.europa.eu/resource/celex/{celex_id}"
 # Not a spoofed browser UA — this is a legitimate public machine-readable endpoint,
 # not a scraping workaround (the eur-lex.europa.eu ELI URL is what's WAF-blocked for
 # non-browser clients; CELLAR is the documented content-negotiation alternative).
-_USER_AGENT = "ai-lab-ingest/0.1 (portfolio project; contact via repo)"
+_USER_AGENT = "eu-ai-act-gdpr-assistant-ingest/0.1 (portfolio project; contact via repo)"
 
 _HEADERS = {
     "Accept": "application/xhtml+xml",

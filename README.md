@@ -1,4 +1,4 @@
-# AI Lab — a compliance copilot for the EU AI Act and GDPR
+# EU AI Act & GDPR Assistant — a compliance copilot
 
 Ask a question in plain language, get an answer where **every claim traces back to a
 specific article or recital** — or an honest "I can't answer that from these sources."

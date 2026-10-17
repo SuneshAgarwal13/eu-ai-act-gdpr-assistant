@@ -1,4 +1,4 @@
-# Project: AI Lab — agentic RAG over EU AI Act & GDPR
+# Project: EU AI Act & GDPR Assistant — agentic RAG
 
 A citation-grounded question-answering product. Users ask in plain language and get
 answers with verifiable citations, or an honest abstention. Runs entirely on free-tier

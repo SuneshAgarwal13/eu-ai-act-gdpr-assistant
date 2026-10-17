@@ -1,4 +1,4 @@
-# Case study — AI Lab: a RAG system built to refuse
+# Case study — EU AI Act & GDPR Assistant: a RAG system built to refuse
 
 *Personal project. Source code and live demo are public.*
 

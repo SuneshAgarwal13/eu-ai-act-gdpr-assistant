@@ -16,7 +16,7 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI Lab — EU AI Act & GDPR compliance copilot",
+  title: "EU AI Act & GDPR Assistant — compliance copilot",
   description: "Citation-grounded question answering",
 };
 

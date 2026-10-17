@@ -82,7 +82,7 @@ def test_deepseek_uses_current_model_with_thinking_split_by_tier() -> None:
 
 # Run pin (LLM_AUDIT_PIN_DEEPSEEK). DeepSeek model ids priced by the llm-audit snapshot
 # llm-audit/src/llm_audit/pricing/snapshots/litellm-a2bf67a.json, copied here as a
-# literal so AI Lab never imports llm-audit. Update both together.
+# literal so this app never imports llm-audit. Update both together.
 _SNAPSHOT_DEEPSEEK_MODELS = {"deepseek/deepseek-flash", "deepseek/deepseek-v4-pro"}
 _HOSTED_TIERS = (Tier.FAST, Tier.REASON, Tier.BULK)
 
