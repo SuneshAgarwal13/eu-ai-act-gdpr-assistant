@@ -51,5 +51,5 @@ jobs:
           file: apps/api/Dockerfile
           push: true
           tags: |
-            ghcr.io/suneshagarwal/ai-lab-api:${{ github.sha }}
-            ghcr.io/suneshagarwal/ai-lab-api:latest
+            ghcr.io/suneshagarwal13/ai-lab-api:${{ github.sha }}
+            ghcr.io/suneshagarwal13/ai-lab-api:latest

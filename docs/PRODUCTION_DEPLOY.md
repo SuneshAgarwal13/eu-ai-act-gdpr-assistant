@@ -34,7 +34,7 @@ storage. The image holds no secrets.
 
 `.github/workflows/publish-api.yml` builds `apps/api/Dockerfile` from the repo root on
 every push to `main` that touches the API's dependency closure, and pushes
-`ghcr.io/suneshagarwal/ai-lab-api:{latest,<sha>}`. After the first run, set the package's
+`ghcr.io/suneshagarwal13/ai-lab-api:{latest,<sha>}`. After the first run, set the package's
 visibility to **public** (GitHub → Packages → ai-lab-api → Package settings). Deploy by
 `:<sha>` so a rollback is one command with an older sha.
 
@@ -50,7 +50,7 @@ count stays under six.
 
 ```bash
 gcloud run deploy ai-lab-api \
-  --image ghcr.io/suneshagarwal/ai-lab-api:<sha> \
+  --image ghcr.io/suneshagarwal13/ai-lab-api:<sha> \
   --region europe-west1 --allow-unauthenticated \
   --memory 1Gi --cpu 1 --min-instances 0 --max-instances 1 \
   --concurrency 20 --timeout 300 \

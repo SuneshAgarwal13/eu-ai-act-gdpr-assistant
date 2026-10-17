@@ -2,7 +2,7 @@
 
 *Personal project. Source code and live demo are public.*
 
-**Live:** https://ai-lab-web-ten.vercel.app · **Source:** https://github.com/SUNESHAGARWAL/AI_Lab
+**Live:** https://ai-lab-web-ten.vercel.app · **Source:** https://github.com/SuneshAgarwal13/eu-ai-act-gdpr-assistant
 
 > INTERNAL — this block is stripped from the PDF build, it isn't shown to clients.
 > Use this three ways: attach it as the gallery PDF on the flagship portfolio item, link it
