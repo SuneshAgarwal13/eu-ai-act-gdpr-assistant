@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import psycopg
@@ -16,6 +17,7 @@ from ingest.guidance import (
     fetch_guidance_pdf,
 )
 from ingest.parser import ParsedDocument, parse_document
+from ingest.status import StatusNote, build_status_chunks, is_stale
 from telemetry import get_logger
 
 logger = get_logger(__name__)
@@ -106,6 +108,30 @@ def ingest_guidance(
     chunks = build_guidance_chunks(source, pages)
     logger.info("ingest.chunks_built", source=source.slug, pages=len(pages), chunks=len(chunks))
     return _embed_and_upsert(conn, embedder_model, source.slug, chunks)
+
+
+def ingest_status_notes(
+    notes: list[StatusNote], conn: psycopg.Connection, embedder_model: SentenceTransformer
+) -> int:
+    """Upserts every status note, and deletes the chunks of notes that were removed."""
+    inserted = 0
+    for note in notes:
+        if is_stale(note, date.today()):
+            logger.warning(
+                "ingest.status_note_stale",
+                note=note.slug,
+                as_of=note.as_of.isoformat(),
+                action="re-check its sources and update as_of",
+            )
+        inserted += _embed_and_upsert(conn, embedder_model, note.slug, build_status_chunks(note))
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM chunks WHERE document_id LIKE 'status:%%'"
+            " AND NOT (document_id = ANY(%(kept)s))",
+            {"kept": [f"status:{note.slug}" for note in notes]},
+        )
+    conn.commit()
+    return inserted
 
 
 def ingest_document(

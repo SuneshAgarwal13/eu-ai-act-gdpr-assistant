@@ -8,7 +8,8 @@ from sentence_transformers import SentenceTransformer
 from ingest.config import Settings
 from ingest.documents import DOCUMENTS
 from ingest.guidance import GUIDANCE_SOURCES
-from ingest.pipeline import ingest_document, ingest_guidance
+from ingest.pipeline import ingest_document, ingest_guidance, ingest_status_notes
+from ingest.status import load_status_notes
 from retrieval import DEFAULT_MODEL_NAME, apply_migrations_sync
 from telemetry import get_logger
 
@@ -69,6 +70,11 @@ def ingest_corpus(
                 guidance, conn, embedder_model, DEFAULT_CACHE_DIR, force_refresh=force_refresh
             )
             logger.info("ingest.document_complete", source=guidance.slug, inserted=inserted)
+        notes = load_status_notes()
+        inserted = ingest_status_notes(notes, conn, embedder_model)
+        logger.info(
+            "ingest.document_complete", source="status", notes=len(notes), inserted=inserted
+        )
 
 
 if __name__ == "__main__":
