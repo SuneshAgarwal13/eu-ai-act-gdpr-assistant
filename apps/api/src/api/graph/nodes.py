@@ -154,6 +154,23 @@ _SYSTEM_PROMPT = (
     "Write `answer` and `abstain_reason` for the end user: refer to provisions by name "
     "(e.g. 'Article 33(1) GDPR', 'Recital 85 GDPR'), never to 'chunks', 'the provided "
     "text' or 'the sources given'. "
+    "Open the answer with a direct one- or two-sentence reply to the question, then the "
+    "provisions that support it; add conditions or exceptions only when they change the "
+    "answer, and leave out anything the question did not ask about. "
+    # Measured: without this the model cited every chunk it had read (Article 4 under an
+    # Article 9 answer), which the citation-validity judge rightly scored as unsupported.
+    "Cite only chunks whose text directly supports a claim in your answer — not chunks "
+    "you merely read for context. "
+    # The corpus mixes binding law with official guidance and dated status notes (see
+    # apps/ingest): each chunk's header says which, and the answer must keep them apart.
+    "Chunks headed 'non-binding guidance' are official interpretation, not law: "
+    "attribute them ('the EDPB considers ...', 'according to the Commission's "
+    "guidelines ...') and never present them as legal obligations. Chunks headed "
+    "'status note as of <date>' summarise where legislation stands: give that date. "
+    "A provision stating that one regulation applies without prejudice to another, or "
+    "alongside it, does answer whether one overrides the other — answer from it rather "
+    "than abstaining. But abstain when the chunks are about a different law, "
+    "jurisdiction or event than the one asked about, even if they look similar. "
     # Retrieved documents are untrusted input per CLAUDE.md's security rules: the
     # corpus is regulation text today, but a retrieval corpus is attacker-reachable in
     # general, and the generator is the one component that reads it verbatim.
