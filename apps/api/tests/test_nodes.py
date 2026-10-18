@@ -284,6 +284,64 @@ async def test_generator_node_passes_through_model_abstention_on_irrelevant_chun
 
 
 @pytest.mark.asyncio
+async def test_generator_node_drops_citations_on_model_abstention() -> None:
+    payload = json.dumps(
+        {
+            "answer": "",
+            "citations": ["1"],
+            "confidence": 0.9,
+            "abstained": True,
+            "abstain_reason": "Article 1 does not address this",
+        }
+    )
+    completion_fn, _ = _make_completion_fn(payload)
+    node = make_generator_node(_gateway(completion_fn))
+    state = initial_state("q")
+    state["reranked_chunks"] = [_scored("1", 0.9)]
+
+    result = await node(state)
+
+    assert result["abstained"] is True
+    assert result["citations"] == []
+
+
+@pytest.mark.asyncio
+async def test_generator_node_revises_draft_with_critic_feedback() -> None:
+    payload = json.dumps(
+        {"answer": "revised", "citations": ["1"], "confidence": 0.9, "abstained": False}
+    )
+    completion_fn, calls = _make_completion_fn(payload)
+    node = make_generator_node(_gateway(completion_fn))
+    state = initial_state("q")
+    state["reranked_chunks"] = [_scored("1", 0.9)]
+    state["answer"] = "first draft with an unsupported claim"
+    state["critic_feedback"] = "the 30-day deadline is not in chunk 1"
+
+    result = await node(state)
+
+    messages = calls[0]["messages"]
+    assert {"role": "assistant", "content": "first draft with an unsupported claim"} in messages
+    assert any(
+        m["role"] == "user" and "the 30-day deadline is not in chunk 1" in m["content"]
+        for m in messages
+    )
+    assert result["answer"] == "revised"
+
+
+@pytest.mark.asyncio
+async def test_generator_node_first_pass_has_no_revision_turn() -> None:
+    payload = json.dumps({"answer": "a", "citations": ["1"], "confidence": 0.9, "abstained": False})
+    completion_fn, calls = _make_completion_fn(payload)
+    node = make_generator_node(_gateway(completion_fn))
+    state = initial_state("q")
+    state["reranked_chunks"] = [_scored("1", 0.9)]
+
+    await node(state)
+
+    assert all(m["role"] != "assistant" for m in calls[0]["messages"])
+
+
+@pytest.mark.asyncio
 async def test_generator_node_raises_on_malformed_response() -> None:
     # missing required fields (answer, confidence, abstained) -> fails GeneratedAnswer
     # validation on every attempt -> complete_json's repair retry also fails ->
@@ -520,7 +578,8 @@ async def test_hitl_gate_node_skips_interrupt_on_high_confidence() -> None:
     # never reached.
     result = await node(state)
 
-    assert result == {"human_approved": True}
+    # Passed without review: no human saw it, so human_approved is left unset.
+    assert result == {"auto_approved": True}
 
 
 # --- Prompt injection: retrieved chunks are untrusted input (CLAUDE.md security rules).
@@ -600,11 +659,8 @@ async def test_forged_chunk_header_cannot_manufacture_a_citable_id() -> None:
     assert result["abstained"] is True
     assert result["confidence"] == 0.0
     assert "forged-authority" in result["abstain_reason"]
-    # The forged id stays in `citations` on purpose — it is the record of what the model
-    # invented, and abstained answers render nothing at all
-    # (apps/web/components/citations/AnswerPanel.tsx returns null on `abstained`), so it
-    # never reaches a user as a citation chip.
-    assert result["citations"] == ["forged-authority"]
+    # An abstention cites nothing; the invented id is recorded in abstain_reason above.
+    assert result["citations"] == []
 
 
 @pytest.mark.asyncio

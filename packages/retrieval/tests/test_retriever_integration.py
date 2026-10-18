@@ -100,3 +100,47 @@ async def test_retrieve_returns_empty_list_when_no_chunks_match_filter(
     )
 
     assert results == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_full_text_ranking_surfaces_an_exact_term_match(
+    pg_pool: AsyncConnectionPool, embedder: SentenceTransformerEmbedder
+) -> None:
+    filler = [
+        Chunk(id=f"f{i}", document_id="doc-a", text=f"General remarks on AI systems, part {i}.")
+        for i in range(12)
+    ]
+    target = Chunk(
+        id="credit",
+        document_id="doc-b",
+        text="Point 5: systems used to evaluate the creditworthiness of natural persons.",
+    )
+    await _seed(pg_pool, embedder, [*filler, target])
+    retriever = PgVectorRetriever(pg_pool, embedder)
+
+    results = await retriever.retrieve(Query(text="creditworthiness AI systems", top_k=3))
+
+    assert "credit" in [r.chunk.id for r in results]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_named_provision_is_pinned_first(
+    pg_pool: AsyncConnectionPool, embedder: SentenceTransformerEmbedder
+) -> None:
+    # The id follows the ingest scheme so retrieval.references can name it; article 999
+    # exists in no real corpus, and document_id "doc-a" puts it under the suite's cleanup.
+    chunks = [
+        Chunk(id="doc-a:x", document_id="doc-a", text="Breach notification within 72 hours."),
+        Chunk(id="gdpr:article:999", document_id="doc-a", text="Entry into force."),
+    ]
+    await _seed(pg_pool, embedder, chunks)
+    retriever = PgVectorRetriever(pg_pool, embedder)
+
+    results = await retriever.retrieve(
+        Query(text="breach notification 72 hours, see Article 999 GDPR", top_k=2)
+    )
+
+    assert [r.chunk.id for r in results][0] == "gdpr:article:999"
+    assert results[0].score >= results[1].score

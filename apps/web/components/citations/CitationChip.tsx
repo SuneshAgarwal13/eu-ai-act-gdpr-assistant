@@ -2,7 +2,7 @@
 
 import { motion } from "motion/react";
 
-import { citationLabel, type CitedChunk } from "@/lib/citations";
+import { citationLabel, provenance, type CitedChunk } from "@/lib/citations";
 
 interface CitationChipProps {
   chunkId: string;
@@ -25,19 +25,21 @@ export function CitationChip({ chunkId, chunk, isOpen, onOpen }: CitationChipPro
   }
 
   const label = citationLabel(chunk.metadata);
+  // Guidance and status notes get a dashed border: visibly not the law itself.
+  const nonBinding = provenance(chunk.metadata).kind !== "law";
 
   return (
     <motion.button
       type="button"
       layoutId={`citation-${chunkId}`}
       onClick={(e) => onOpen(chunkId, e.currentTarget)}
-      aria-label={`Open source: ${label}`}
+      aria-label={`Open source: ${label}${nonBinding ? " (non-binding)" : ""}`}
       aria-expanded={isOpen}
       // Stays mounted (so the text flow doesn't reflow) but visually yields to
       // SourcePanel while it's open — both share layoutId, and motion's projection
       // animates the FLIP between wherever this chip sits and wherever the panel ends
       // up, per motion.dev's shared-layout pattern.
-      className={`${CHIP_CLASS} hover:border-citation cursor-pointer transition-colors ${isOpen ? "pointer-events-none opacity-0" : ""}`}
+      className={`${CHIP_CLASS} hover:border-citation cursor-pointer transition-colors ${nonBinding ? "border-dashed" : ""} ${isOpen ? "pointer-events-none opacity-0" : ""}`}
     >
       {label}
     </motion.button>

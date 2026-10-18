@@ -1,7 +1,13 @@
 import math
 
 import pytest
-from evals.metrics import ndcg_at_k, recall_at_k, reciprocal_rank
+from evals.metrics import (
+    hit_at_k_containing,
+    ndcg_at_k,
+    recall_at_k,
+    reciprocal_rank,
+    reciprocal_rank_containing,
+)
 
 # ---------------------------------------------------------------------------
 # recall_at_k
@@ -102,3 +108,27 @@ def test_ndcg_at_k_more_relevant_items_than_k() -> None:
     retrieved = ["a", "b"]
     relevant = {"a", "b", "z"}
     assert ndcg_at_k(retrieved, relevant, k=2) == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# containment-aware variants (ADR 0006 grain artifact)
+# ---------------------------------------------------------------------------
+
+
+def test_parent_article_counts_as_containing_its_paragraph() -> None:
+    retrieved = ["gdpr:article:5", "gdpr:article:33"]
+    relevant = {"gdpr:article:33:paragraph:1"}
+
+    assert recall_at_k(retrieved, relevant, 2) == 0.0  # strict: a miss
+    assert hit_at_k_containing(retrieved, relevant, 2) == 1.0
+    assert reciprocal_rank_containing(retrieved, relevant, 2) == 0.5
+
+
+def test_annex_contains_its_points_but_not_a_lookalike_id() -> None:
+    relevant = {"eu_ai_act:annex:III:point:5"}
+
+    assert hit_at_k_containing(["eu_ai_act:annex:III"], relevant, 1) == 1.0
+    # "article:3" must not be read as containing "article:33:..."
+    assert hit_at_k_containing(["gdpr:article:3"], {"gdpr:article:33:paragraph:1"}, 1) == 0.0
+    # A paragraph does not contain its whole article.
+    assert hit_at_k_containing(["gdpr:article:33:paragraph:1"], {"gdpr:article:33"}, 1) == 0.0

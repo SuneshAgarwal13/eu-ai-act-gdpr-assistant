@@ -28,7 +28,7 @@ interface TerminalPanelProps {
   onShowRawEvents?: () => void;
 }
 
-function ReviewNotice({ confidence }: { confidence: number | null }) {
+function ReviewNotice({ confidence, unverified }: { confidence: number | null; unverified: string | null }) {
   return (
     <div className="border-citation bg-citation/5 mb-4 border-l-4 px-4 py-3">
       <p className="text-citation font-mono text-[11px] tracking-wide uppercase">
@@ -36,9 +36,12 @@ function ReviewNotice({ confidence }: { confidence: number | null }) {
         {confidence !== null && ` · confidence ${confidence.toFixed(2).replace(/^0/, "")}`}
       </p>
       <p className="mt-1 max-w-prose font-serif text-sm leading-relaxed text-ink/80">
-        Below this system&apos;s confidence threshold — verify against the cited text before
-        relying on it.
+        {unverified
+          ? "The fact-check could not confirm part of this answer against the cited text"
+          : "Below this system's confidence threshold"}{" "}
+        — verify against the cited text before relying on it.
       </p>
+      {unverified && <p className="mt-2 max-w-prose font-mono text-xs text-ink/70">{unverified}</p>}
     </div>
   );
 }
@@ -80,7 +83,7 @@ export function TerminalPanel({
           citations={terminal.citations}
           chunksById={chunksById}
           reduceMotion={reduceMotion}
-          notice={<ReviewNotice confidence={terminal.confidence} />}
+          notice={<ReviewNotice confidence={terminal.confidence} unverified={terminal.unverified} />}
         />
       );
 

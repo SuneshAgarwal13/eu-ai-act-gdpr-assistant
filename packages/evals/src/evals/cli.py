@@ -18,7 +18,7 @@ from evals.generation_scorecard import (
     render_generation_table,
     write_generation_report,
 )
-from evals.golden import GoldenItem, append_golden_items, load_golden_set
+from evals.golden import GoldenItem, Split, append_golden_items, load_golden_set
 from evals.judge import DEFAULT_JUDGE_TIER, GatewayJudgeModel
 from evals.judge_agreement import build_judge_agreement_report
 from evals.promote import promote_to_golden_set
@@ -77,14 +77,21 @@ def build_retrieve_fn(
     return retrieve_fn
 
 
+def _filter_split(items: list[GoldenItem], split: str) -> list[GoldenItem]:
+    if split == "all":
+        return items
+    return [item for item in items if item.split == Split(split)]
+
+
 async def _run_retrieval_async(
     golden_set: Path,
     k_values: list[int],
     output_dir: Path,
     rerank: bool,
     rerank_pool_size: int,
+    split: str,
 ) -> None:
-    golden_items = load_golden_set(golden_set)
+    golden_items = _filter_split(load_golden_set(golden_set), split)
     logger.info("evals.golden_set_loaded", path=str(golden_set), count=len(golden_items))
 
     retriever, pool = await _open_retriever()
@@ -102,6 +109,7 @@ async def _run_retrieval_async(
             generated_at=datetime.now(UTC).isoformat(),
             reranked=rerank,
             reranker_model=DEFAULT_RERANKER_MODEL_NAME if rerank else None,
+            split=split,
         )
     finally:
         await pool.close()
@@ -123,6 +131,9 @@ _OUTPUT_DIR_OPTION = typer.Option(DEFAULT_REPORTS_DIR, help="Directory to write 
 _RERANK_OPTION = typer.Option(
     False, "--rerank", help="Score reranked order instead of raw retrieval order."
 )
+_SPLIT_OPTION = typer.Option(
+    "all", "--split", help="Golden-set split to score: dev, test or all."
+)
 _RERANK_POOL_SIZE_OPTION = typer.Option(
     20,
     "--rerank-pool-size",
@@ -137,6 +148,7 @@ def run_retrieval(
     output_dir: Path = _OUTPUT_DIR_OPTION,
     rerank: bool = _RERANK_OPTION,
     rerank_pool_size: int = _RERANK_POOL_SIZE_OPTION,
+    split: str = _SPLIT_OPTION,
 ) -> None:
     """Scores the real PgVectorRetriever against a golden set: recall@k, MRR@k,
     nDCG@k, no LLM/judge call — the deterministic layer-2 retrieval metrics. Pass
@@ -145,7 +157,7 @@ def run_retrieval(
     `reranked` field."""
     k_values = [int(part) for part in k.split(",")]
     asyncio.run(
-        _run_retrieval_async(golden_set, k_values, output_dir, rerank, rerank_pool_size)
+        _run_retrieval_async(golden_set, k_values, output_dir, rerank, rerank_pool_size, split)
     )
 
 
@@ -288,9 +300,9 @@ def _select_sample(
 
 
 async def _run_generation_eval_async(
-    golden_set: Path, sample: int | None, judge_tier: Tier, output_dir: Path
+    golden_set: Path, sample: int | None, judge_tier: Tier, output_dir: Path, split: str
 ) -> None:
-    golden_items = load_golden_set(golden_set)
+    golden_items = _filter_split(load_golden_set(golden_set), split)
     selected = _select_sample(golden_items, sample, None)
     logger.info(
         "evals.generation_eval_started",
@@ -364,6 +376,7 @@ def run_generation_eval(
     sample: int | None = _GENERATION_SAMPLE_OPTION,
     judge_tier: str = _GENERATION_JUDGE_TIER_OPTION,
     output_dir: Path = _GENERATION_OUTPUT_DIR_OPTION,
+    split: str = _SPLIT_OPTION,
 ) -> None:
     """Layer 3: runs the real graph end-to-end per golden item and scores the
     generated answer — faithfulness/answer_relevancy (deepeval, judged through our
@@ -373,7 +386,9 @@ def run_generation_eval(
     set, and read the judge-agreement-report output before trusting these numbers
     at scale."""
     asyncio.run(
-        _run_generation_eval_async(golden_set, sample, _parse_judge_tier(judge_tier), output_dir)
+        _run_generation_eval_async(
+            golden_set, sample, _parse_judge_tier(judge_tier), output_dir, split
+        )
     )
 
 

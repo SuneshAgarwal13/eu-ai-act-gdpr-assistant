@@ -16,13 +16,15 @@ line:
 | `question` | string | the question text |
 | `relevant_chunk_ids` | list[string] | ground-truth relevant `chunk_id`s (empty only for `out_of_scope` items) |
 | `difficulty` | `easy` \| `medium` \| `hard` | informal difficulty tag |
-| `question_type` | `factual_lookup` \| `role_scoped` \| `cross_reference` \| `out_of_scope` | see taxonomy below |
+| `question_type` | `factual_lookup` \| `role_scoped` \| `cross_reference` \| `cross_regulation` \| `guidance` \| `out_of_scope` \| `in_domain_unanswerable` | see taxonomy below |
 | `provenance` | object | `{author, date, source_reference}` |
+| `split` | `dev` \| `test` | `dev` (default) may be tuned against; `test` is held out — report aggregates only, never tune on per-item test results |
 
-**No assistant-authored ground truth ever enters this file directly.** Every item's
-`relevant_chunk_ids` mapping must come from a human who read the actual chunk
-content and confirmed relevance — see the promotion workflow below. This file ships
-empty; it grows only through manual, human-reviewed additions.
+**No unverified ground truth enters this file.** Every item's `relevant_chunk_ids`
+mapping must have been checked against the actual chunk text before it is added — either
+by a human through the promotion workflow below, or (items `pl-*`, `xr-*`, `gd-*`,
+`st-*`, `un-*`, `oos-*`) by a dedicated verification pass described under the
+provenance rule.
 
 ### `question_type` taxonomy
 
@@ -40,16 +42,29 @@ or reuse one for the other.
 - **`cross_reference`** — a question whose full answer genuinely spans more than one
   chunk, grounded in the real `metadata->>'cross_references'` values populated
   during ingestion (`apps/ingest/src/ingest/references.py`).
+- **`cross_regulation`** — needs the AI Act and the GDPR together (e.g. DPIA plus
+  fundamental rights impact assessment).
+- **`guidance`** — answered by official, non-binding guidance (EDPB, Commission) rather
+  than the regulation text.
 - **`out_of_scope`** — a question clearly outside the AI Act/GDPR corpus, testing
   correct low-relevance/abstention behavior. By definition `relevant_chunk_ids` is
   empty for these — there is nothing a retriever could correctly return.
+- **`in_domain_unanswerable`** — on-topic for AI and data-protection law but not
+  answerable from the corpus (another jurisdiction, an enforcement decision, case law).
+  Must abstain, like `out_of_scope`; harder, because retrieval finds plausible text.
 
 ### Provenance rule
 
 Per `CLAUDE.md`: never add an item without a provenance entry (source, author of the
-expected answer, date, difficulty). `author` should be a real person's name (or
-handle), not "claude" or an assistant identity — this file only ever records
-human-validated ground truth.
+expected answer, date, difficulty). `author` names everyone who produced the label,
+truthfully.
+
+The 48 items added on 2026-10-18 were drafted by Claude and verified, at the project
+owner's request, by a separate Claude Opus 5.5 agent that read every proposed chunk
+read-only from the database, searched for better or missing chunks, and confirmed by
+full-text search that the abstain items really are unanswerable. It accepted 35,
+corrected 13 and rejected none. Their `author` field says so. Any of them can be
+re-checked or demoted like any other item.
 
 ## `candidates_for_review.jsonl` — NOT the golden set
 

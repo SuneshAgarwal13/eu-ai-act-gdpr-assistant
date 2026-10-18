@@ -35,7 +35,7 @@ interface RetryEdgeProps {
   reduceMotion: boolean;
 }
 
-/** The critic -> retriever retry loop. Only ever mounted (via AnimatePresence in
+/** The critic -> generator revision loop. Only ever mounted (via AnimatePresence in
  * AgentGraph) while a retry is actually in flight — it's rare in practice, so the
  * animation stays understated: dashed, `active`-colored, drawn once. */
 export function RetryGraphEdge({ spec, reduceMotion }: RetryEdgeProps) {

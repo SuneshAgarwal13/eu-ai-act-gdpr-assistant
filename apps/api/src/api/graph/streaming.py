@@ -16,7 +16,7 @@ request-scoped wrapper rather than a change to packages/llm/gateway.py."""
 import time
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
@@ -34,6 +34,7 @@ from api.graph.events import (
     RetryLoopEvent,
     TokenUsage,
 )
+from api.graph.nodes import route_after_critic
 from api.graph.state import AgentState
 from llm import AllProvidersExhausted, BudgetExceeded, CompletionRequest, CompletionResult, Gateway
 from telemetry import get_logger
@@ -88,6 +89,9 @@ async def stream_graph_events(
 
     started_at: dict[str, float] = {}
     interrupted = False
+    # The planner lowers the retry cap per query; tracked so a retry_loop event is only
+    # emitted when the graph will actually loop, not on the critic pass that hits the cap.
+    retry_budget = state["retry_budget"]
 
     try:
         async for _mode, payload in graph.astream(state, config, stream_mode=["tasks"]):
@@ -117,7 +121,24 @@ async def stream_graph_events(
                 payload=build_payload(result),
             )
 
-            if node is NodeName.CRITIC and result.get("needs_retry"):
+            if node is NodeName.PLANNER and "retry_budget" in result:
+                retry_budget = result["retry_budget"]
+
+            will_retry = node is NodeName.CRITIC and result.get("needs_retry", False) and (
+                route_after_critic(
+                    cast(
+                        AgentState,
+                        {
+                            "needs_retry": True,
+                            "retry_count": result["retry_count"],
+                            "retry_budget": retry_budget,
+                            "max_retries": state["max_retries"],
+                        },
+                    )
+                )
+                == "retry"
+            )
+            if will_retry:
                 yield RetryLoopEvent(
                     thread_id=thread_id,
                     emitted_at=time.time(),
@@ -200,6 +221,7 @@ async def stream_graph_events(
             confidence=values.get("confidence"),
             abstained=values.get("abstained", False),
             human_approved=values.get("human_approved"),
+            auto_approved=values.get("auto_approved", False),
         )
 
 

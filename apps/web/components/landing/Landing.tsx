@@ -1,7 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
+
+import { warmUpBackend } from "@/lib/sse-client";
 
 import { ExampleQuestions } from "./ExampleQuestions";
 import { Footer } from "./Footer";
@@ -19,6 +21,8 @@ export const QUERY_PLACEHOLDER =
 export function Landing({ onAsk }: { onAsk: (question: string) => void }) {
   const [query, setQuery] = useState("");
   const reduceMotion = useReducedMotion() ?? false;
+
+  useEffect(warmUpBackend, []);
 
   const container = {
     hidden: {},

@@ -7,6 +7,7 @@ from typing import Any, Literal
 from core.models import Query, ScoredChunk
 from core.ports import Reranker, Retriever
 from langgraph.types import interrupt
+from opentelemetry import trace
 
 from api.graph.schemas import CriticVerdict, GeneratedAnswer, PlannerDecision, QueryIntent
 from api.graph.state import AgentState
@@ -19,9 +20,13 @@ def _planner_system_prompt(max_retries: int) -> str:
         "Given the user's raw question, do three things: "
         "1) Rewrite it into a version optimized for retrieval — expand vague "
         "phrasing, resolve pronouns and ambiguous references using context from the "
-        "question itself, and add relevant terminology if the intent is clear. If "
+        "question itself, and add relevant terminology if the intent is clear — prefer "
+        "the regulations' own drafting terms (e.g. 'without prejudice to' when asking "
+        "whether one law overrides another; 'deployer', 'placing on the market'). If "
         "the question is already clear and well-formed, the rewrite can match the "
-        "original. "
+        "original. Never add an article, recital or annex number the user did not "
+        "write — the retriever fetches any provision the rewrite names, so a guessed "
+        "number pulls in the wrong text. "
         "2) Classify the intent as exactly one of: `factual_lookup` (a direct "
         "factual question answerable from a corpus), `role_scoped_applicability` (a "
         "question about whether or how something applies to a specific role, "
@@ -146,6 +151,28 @@ _SYSTEM_PROMPT = (
     "below — never invent or guess an id. If the provided chunks do not contain "
     "enough information to answer confidently, set `abstained` to true and explain "
     "why in `abstain_reason` instead of guessing. "
+    # The answer and abstain_reason are shown verbatim to the end user, who never sees
+    # the word "chunk" anywhere else in the product.
+    "Write `answer` and `abstain_reason` for the end user: refer to provisions by name "
+    "(e.g. 'Article 33(1) GDPR', 'Recital 85 GDPR'), never to 'chunks', 'the provided "
+    "text' or 'the sources given'. "
+    "Open the answer with a direct one- or two-sentence reply to the question, then the "
+    "provisions that support it; add conditions or exceptions only when they change the "
+    "answer, and leave out anything the question did not ask about. "
+    # Measured: without this the model cited every chunk it had read (Article 4 under an
+    # Article 9 answer), which the citation-validity judge rightly scored as unsupported.
+    "Cite only chunks whose text directly supports a claim in your answer — not chunks "
+    "you merely read for context. "
+    # The corpus mixes binding law with official guidance and dated status notes (see
+    # apps/ingest): each chunk's header says which, and the answer must keep them apart.
+    "Chunks headed 'non-binding guidance' are official interpretation, not law: "
+    "attribute them ('the EDPB considers ...', 'according to the Commission's "
+    "guidelines ...') and never present them as legal obligations. Chunks headed "
+    "'status note as of <date>' summarise where legislation stands: give that date. "
+    "A provision stating that one regulation applies without prejudice to another, or "
+    "alongside it, does answer whether one overrides the other — answer from it rather "
+    "than abstaining. But abstain when the chunks are about a different law, "
+    "jurisdiction or event than the one asked about, even if they look similar. "
     # Retrieved documents are untrusted input per CLAUDE.md's security rules: the
     # corpus is regulation text today, but a retrieval corpus is attacker-reachable in
     # general, and the generator is the one component that reads it verbatim.
@@ -162,13 +189,36 @@ def _format_chunks(chunks: list[ScoredChunk]) -> str:
     return "\n\n".join(f"[chunk_id={sc.chunk.id}]\n{sc.chunk.text}" for sc in chunks)
 
 
-def _build_messages(query: str, chunks: list[ScoredChunk]) -> list[Message]:
-    return [
+_REVISION_INSTRUCTION = (
+    "A fact-checker compared your previous answer with the chunks it cites and flagged "
+    "an unsupported claim. Its note, quoted: \"{feedback}\"\n"
+    "Return a corrected answer in the same JSON format: remove or correct that claim "
+    "using only the chunks above, keep every claim they do support, and update "
+    "`citations` and `confidence` to match."
+)
+
+
+def _build_messages(
+    query: str,
+    chunks: list[ScoredChunk],
+    previous_answer: str | None = None,
+    critic_feedback: str | None = None,
+) -> list[Message]:
+    messages = [
         Message(role="system", content=_SYSTEM_PROMPT),
         Message(
             role="user", content=f"Question: {query}\n\nChunks:\n{_format_chunks(chunks)}"
         ),
     ]
+    # A critic retry revises the draft against the same chunks rather than retrieving
+    # again: the query hasn't changed, so a second retrieval returns the same chunks and
+    # an unguided regeneration tends to repeat the same unsupported claim.
+    if previous_answer and critic_feedback:
+        messages.append(Message(role="assistant", content=previous_answer))
+        messages.append(
+            Message(role="user", content=_REVISION_INSTRUCTION.format(feedback=critic_feedback))
+        )
+    return messages
 
 
 def _validate_citations(parsed: GeneratedAnswer, valid_chunk_ids: set[str]) -> GeneratedAnswer:
@@ -218,7 +268,9 @@ def make_generator_node(
             }
 
         query_text = state["rewritten_query"] or state["query"]
-        messages = _build_messages(query_text, chunks)
+        messages = _build_messages(
+            query_text, chunks, state["answer"], state["critic_feedback"]
+        )
         # 4096, not the complete_json default (1024): the reason tier's primary
         # model, deepseek-flash in thinking mode, spends real completion tokens on an
         # internal reasoning pass before emitting visible content — verified
@@ -235,7 +287,9 @@ def make_generator_node(
         parsed = _validate_citations(result, {sc.chunk.id for sc in chunks})
         return {
             "answer": parsed.answer,
-            "citations": parsed.citations,
+            # An abstention makes no claim, so it cites nothing — otherwise the UI would
+            # show source chips under "this system can't answer that".
+            "citations": [] if parsed.abstained else parsed.citations,
             "confidence": parsed.confidence,
             "abstained": parsed.abstained,
             "abstain_reason": parsed.abstain_reason,
@@ -316,6 +370,7 @@ def make_critic_node(
             gateway, tier, messages, CriticVerdict, max_tokens=400, feature="critic"
         )
 
+        trace.get_current_span().set_attribute("critic.faithful", verdict.faithful)
         if verdict.faithful:
             return {"needs_retry": False, "critic_feedback": None}
 
@@ -343,6 +398,10 @@ DEFAULT_CONFIDENCE_THRESHOLD = 0.7
 
 def _needs_human_review(state: AgentState, confidence_threshold: float) -> bool:
     if state["abstained"]:
+        return True
+    # The critic still rejects the draft after the retry cap ran out. Confidence is the
+    # generator grading its own work, so it can't override the critic.
+    if state["needs_retry"]:
         return True
     confidence = state["confidence"]
     # Missing confidence fails safe toward triggering review, not skipping it — a
@@ -384,8 +443,11 @@ def make_hitl_gate_node(
     accept, reject, or edit."""
 
     async def hitl_gate_node(state: AgentState) -> dict[str, Any]:
+        critic_exhausted = state["needs_retry"] and not state["abstained"]
+        trace.get_current_span().set_attribute("hitl.critic_exhausted", critic_exhausted)
         if not _needs_human_review(state, confidence_threshold):
-            return {"human_approved": True}  # auto-approved: no review was needed
+            # No human looked at it, so human_approved stays None.
+            return {"auto_approved": True}
 
         if state["intent"] is QueryIntent.OUT_OF_SCOPE:
             payload = {
@@ -402,6 +464,9 @@ def make_hitl_gate_node(
                 "confidence": state["confidence"],
                 "abstained": state["abstained"],
                 "abstain_reason": state["abstain_reason"],
+                # Set only when the critic still rejects the draft after the retry cap:
+                # the UI shows the draft with this note instead of as a vetted answer.
+                "critic_feedback": state["critic_feedback"] if critic_exhausted else None,
             }
 
         return _apply_hitl_decision(interrupt(payload))

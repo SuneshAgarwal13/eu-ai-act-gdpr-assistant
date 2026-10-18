@@ -113,7 +113,7 @@ export function AgentGraph({ events, isStreaming, waitPhase, onBackToExamples }:
             <GraphNode name={name} state={state.nodes[name]} reduceMotion={reduceMotion} variant="row" />
             {name === "critic" && retryVisible && (
               <p className="text-active pb-2 font-mono text-[10px]">
-                ↩ retrying retriever…{state.retry?.reason ? ` — ${state.retry.reason}` : ""}
+                ↩ revising the answer…{state.retry?.reason ? ` — ${state.retry.reason}` : ""}
               </p>
             )}
           </div>

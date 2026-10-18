@@ -7,7 +7,9 @@ from sentence_transformers import SentenceTransformer
 
 from ingest.config import Settings
 from ingest.documents import DOCUMENTS
-from ingest.pipeline import ingest_document
+from ingest.guidance import GUIDANCE_SOURCES
+from ingest.pipeline import ingest_document, ingest_guidance, ingest_status_notes
+from ingest.status import load_status_notes
 from retrieval import DEFAULT_MODEL_NAME, apply_migrations_sync
 from telemetry import get_logger
 
@@ -34,8 +36,8 @@ def ingest_corpus(
         help="Cap the number of articles/recitals parsed per document (for manual testing).",
     ),
 ) -> None:
-    """Fetches, parses, chunks, embeds, and idempotently upserts the EU AI Act and
-    GDPR into the pgvector chunks table. Sync throughout, per CLAUDE.md's
+    """Fetches, parses, chunks, embeds, and idempotently upserts the EU AI Act, GDPR
+    and their official guidance into the pgvector chunks table. Sync throughout, per CLAUDE.md's
     "sync only in apps/ingest" convention — this is a one-shot offline batch job,
     not part of the async request path."""
     settings = Settings()
@@ -63,6 +65,16 @@ def ingest_corpus(
                 chunks=stats.chunks,
                 inserted=stats.inserted,
             )
+        for guidance in GUIDANCE_SOURCES:
+            inserted = ingest_guidance(
+                guidance, conn, embedder_model, DEFAULT_CACHE_DIR, force_refresh=force_refresh
+            )
+            logger.info("ingest.document_complete", source=guidance.slug, inserted=inserted)
+        notes = load_status_notes()
+        inserted = ingest_status_notes(notes, conn, embedder_model)
+        logger.info(
+            "ingest.document_complete", source="status", notes=len(notes), inserted=inserted
+        )
 
 
 if __name__ == "__main__":

@@ -31,6 +31,30 @@ def reciprocal_rank(retrieved_ids: list[str], relevant_ids: set[str], k: int) ->
     return 0.0
 
 
+def _covers(retrieved_id: str, relevant_id: str) -> bool:
+    """A retrieved article- or annex-level chunk holds each of its paragraph/point
+    chunks verbatim (apps/ingest chunks.py), so it gives the generator the same text."""
+    return retrieved_id == relevant_id or relevant_id.startswith(
+        (f"{retrieved_id}:paragraph:", f"{retrieved_id}:point:")
+    )
+
+
+def hit_at_k_containing(retrieved_ids: list[str], relevant_ids: set[str], k: int) -> float:
+    """1.0 if any of the top-k chunks is, or contains, a relevant chunk. The strict
+    metrics count a whole-article hit as a miss when the label is a paragraph — the
+    grain artifact in ADR 0006 — so this is reported alongside them, never instead."""
+    _validate(retrieved_ids, relevant_ids, k)
+    return float(any(_covers(r, rel) for r in retrieved_ids[:k] for rel in relevant_ids))
+
+
+def reciprocal_rank_containing(retrieved_ids: list[str], relevant_ids: set[str], k: int) -> float:
+    _validate(retrieved_ids, relevant_ids, k)
+    for rank, chunk_id in enumerate(retrieved_ids[:k], start=1):
+        if any(_covers(chunk_id, rel) for rel in relevant_ids):
+            return 1.0 / rank
+    return 0.0
+
+
 def ndcg_at_k(retrieved_ids: list[str], relevant_ids: set[str], k: int) -> float:
     """Binary-relevance nDCG@k: DCG = sum of 1/log2(rank+1) over hits in the top-k,
     IDCG = the same formula for the ideal ranking (all relevant items first, capped

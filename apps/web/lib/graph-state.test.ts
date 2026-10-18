@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { NODE_ORDER } from "./graph-layout";
 import { graphReducer, initialGraphVizState, selectTerminal, type Terminal } from "./graph-state";
-import { cachedFixtureFor } from "./replay-client";
+import exampleFixtures from "./example-fixtures.json";
 import type { GraphEvent } from "./types/graph-events.generated";
 
 function replay(events: GraphEvent[]) {
@@ -63,6 +63,34 @@ describe("selectTerminal", () => {
       answer: "The EU AI Act addresses personal data handling through Article 10.",
       citations: ["aia-art-10"],
       confidence: 0.58,
+    });
+  });
+
+  it("carries the critic's note when the draft failed the fact-check at the retry cap", () => {
+    const events: GraphEvent[] = [
+      started,
+      ...fullNodeRun(),
+      {
+        type: "graph_interrupted",
+        thread_id: "t",
+        emitted_at: 9,
+        interrupt: {
+          type: "review",
+          answer: "Both assessments apply.",
+          citations: ["eu_ai_act:article:27"],
+          confidence: 0.92,
+          abstained: false,
+          abstain_reason: null,
+          critic_feedback: "Recital 77 does not mention fundamental rights assessments.",
+        },
+      },
+    ];
+
+    const terminal = selectTerminal(replay(events), false);
+
+    expect(terminal).toMatchObject({
+      kind: "review",
+      unverified: "Recital 77 does not mention fundamental rights assessments.",
     });
   });
 
@@ -225,14 +253,7 @@ describe("the never-blank guarantee", () => {
 
   /** Every recorded live run behind the curated examples — the real event shapes off the
    * wire, not synthesized ones. */
-  const FIXTURES: GraphEvent[][] = [
-    "What are the requirements for high-risk AI systems under the EU AI Act?",
-    "What is a data protection impact assessment under GDPR?",
-    "How does the GDPR define personal data?",
-    "How do the fines for AI Act deployer violations compare to GDPR fines?",
-  ]
-    .map((q) => cachedFixtureFor(q))
-    .filter((f): f is GraphEvent[] => f !== undefined);
+  const FIXTURES: GraphEvent[][] = Object.values(exampleFixtures as Record<string, GraphEvent[]>);
 
   const SEQUENCES: GraphEvent[][] = [[], [started], [started, ...fullNodeRun()], ...FIXTURES];
 

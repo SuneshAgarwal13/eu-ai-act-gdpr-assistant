@@ -31,6 +31,7 @@ class AgentState(TypedDict):
     max_retries: int
     retry_budget: int
     human_approved: bool | None
+    auto_approved: bool
 
 
 def initial_state(
@@ -57,4 +58,5 @@ def initial_state(
         max_retries=max_retries,
         retry_budget=retry_budget if retry_budget is not None else max_retries,
         human_approved=None,
+        auto_approved=False,
     )

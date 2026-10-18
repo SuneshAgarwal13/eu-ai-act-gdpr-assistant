@@ -52,7 +52,7 @@ def build_graph(
     builder.add_edge("reranker", "generator")
     builder.add_edge("generator", "critic")
     builder.add_conditional_edges(
-        "critic", route_after_critic, {"retry": "retriever", "proceed": "hitl_gate"}
+        "critic", route_after_critic, {"retry": "generator", "proceed": "hitl_gate"}
     )
     builder.add_edge("hitl_gate", END)
 

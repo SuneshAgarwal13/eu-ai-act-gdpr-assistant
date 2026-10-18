@@ -181,7 +181,14 @@ export function graphReducer(state: GraphVizState, event: GraphEvent): GraphVizS
  * to render, with a real cited answer sitting unread in `interrupt`. */
 export type Terminal =
   | { kind: "answer"; answer: string; citations: string[]; confidence: number | null }
-  | { kind: "review"; answer: string; citations: string[]; confidence: number | null }
+  | {
+      kind: "review";
+      answer: string;
+      citations: string[];
+      confidence: number | null;
+      /** The critic's note when it still rejected the draft after the retry cap. */
+      unverified: string | null;
+    }
   | { kind: "abstain"; reason: string }
   | { kind: "out_of_scope"; reason: string | null }
   | { kind: "error"; message: string; retryable: boolean; friendly: boolean }
@@ -229,6 +236,7 @@ function terminalFromInterrupt(interrupt: Record<string, unknown>): Terminal {
     answer,
     citations: strList(interrupt.citations),
     confidence: num(interrupt.confidence),
+    unverified: str(interrupt.critic_feedback),
   };
 }
 

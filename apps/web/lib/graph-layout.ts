@@ -64,16 +64,16 @@ export const FORWARD_EDGES: EdgeSpec[] = [
   { key: edgeKey("critic", "hitl_gate"), from: "critic", to: "hitl_gate", path: straightPath("critic", "hitl_gate"), kind: "forward" },
 ];
 
-/** The rare critic -> retriever retry loop: a large backward arc dipping well below the
- * main flow so it never crosses another node. Dashed + `active`-colored, only rendered
+/** The rare critic -> generator revision loop: a backward arc dipping below the main
+ * flow so it never crosses another node. Dashed + `active`-colored, only rendered
  * while a retry is in flight (see GraphVizState.retry). */
 export const RETRY_EDGE: EdgeSpec = {
-  key: edgeKey("critic", "retriever"),
+  key: edgeKey("critic", "generator"),
   from: "critic",
-  to: "retriever",
+  to: "generator",
   path: (() => {
     const a = NODE_POSITIONS.critic;
-    const b = NODE_POSITIONS.retriever;
+    const b = NODE_POSITIONS.generator;
     const dipY = 390;
     return `M ${a.x} ${a.y} C ${a.x} ${dipY}, ${b.x} ${dipY}, ${b.x} ${b.y}`;
   })(),

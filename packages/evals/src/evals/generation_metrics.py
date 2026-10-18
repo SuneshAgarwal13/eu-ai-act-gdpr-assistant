@@ -7,7 +7,7 @@ evals/cli.py's run-generation-eval."""
 from pydantic import BaseModel, ConfigDict
 
 from evals.generation_run import GenerationRunResult
-from evals.golden import QuestionType
+from evals.golden import ABSTAIN_TYPES
 from evals.judge import GatewayJudgeModel, judge_citation_support
 from llm import Gateway
 
@@ -43,7 +43,7 @@ def appropriate_abstention(results: list[GenerationRunResult]) -> AbstentionRepo
     false_answer = 0
 
     for result in results:
-        expected_abstain = result.question_type is QuestionType.OUT_OF_SCOPE
+        expected_abstain = result.question_type in ABSTAIN_TYPES
         correct = expected_abstain == result.abstained
         outcomes.append(
             AbstentionOutcome(
