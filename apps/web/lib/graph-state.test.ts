@@ -66,6 +66,34 @@ describe("selectTerminal", () => {
     });
   });
 
+  it("carries the critic's note when the draft failed the fact-check at the retry cap", () => {
+    const events: GraphEvent[] = [
+      started,
+      ...fullNodeRun(),
+      {
+        type: "graph_interrupted",
+        thread_id: "t",
+        emitted_at: 9,
+        interrupt: {
+          type: "review",
+          answer: "Both assessments apply.",
+          citations: ["eu_ai_act:article:27"],
+          confidence: 0.92,
+          abstained: false,
+          abstain_reason: null,
+          critic_feedback: "Recital 77 does not mention fundamental rights assessments.",
+        },
+      },
+    ];
+
+    const terminal = selectTerminal(replay(events), false);
+
+    expect(terminal).toMatchObject({
+      kind: "review",
+      unverified: "Recital 77 does not mention fundamental rights assessments.",
+    });
+  });
+
   it("degrades a review interrupt with no draft text to an abstention", () => {
     const state = replay([
       started,

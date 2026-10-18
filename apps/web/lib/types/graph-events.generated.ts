@@ -43,7 +43,7 @@ export type Type3 = "retry_loop";
 export type ThreadId3 = string;
 export type EmittedAt3 = number;
 export type FromNode = "critic";
-export type ToNode = "retriever";
+export type ToNode = "generator";
 export type RetryCount = number;
 export type Reason = string | null;
 export type Type4 = "graph_interrupted";
@@ -57,6 +57,7 @@ export type Citations = string[];
 export type Confidence = number | null;
 export type Abstained = boolean;
 export type HumanApproved = boolean | null;
+export type AutoApproved = boolean;
 export type Type6 = "error";
 export type ThreadId6 = string;
 export type EmittedAt6 = number;
@@ -110,8 +111,9 @@ export interface Payload {
   [k: string]: unknown;
 }
 /**
- * Fired when the critic decides to loop back to the retriever — the backward edge
- * the frontend needs to animate distinctly from the normal forward flow. Derived from
+ * Fired when the critic sends the draft back to the generator for revision — the
+ * backward edge
+ * the frontend animates distinctly from the normal forward flow. Derived from
  * the critic node's own result dict (needs_retry=True), not a separate LangGraph
  * signal — see api.graph.nodes.make_critic_node.
  */
@@ -153,6 +155,7 @@ export interface GraphCompletedEvent {
   confidence: Confidence;
   abstained: Abstained;
   human_approved: HumanApproved;
+  auto_approved?: AutoApproved;
   [k: string]: unknown;
 }
 /**
