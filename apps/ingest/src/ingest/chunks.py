@@ -19,16 +19,28 @@ class IngestChunk:
 BINDING = "binding"
 
 
-def _provenance(source: DocumentSource, anchor: str) -> dict[str, str]:
-    return {"authority": BINDING, "source_url": source.eurlex_url(anchor)}
+def _provenance(
+    source: DocumentSource, anchor: str, *, consolidated: bool = False
+) -> dict[str, str]:
+    metadata = {
+        "authority": BINDING,
+        "source_url": source.eurlex_url(anchor, consolidated=consolidated),
+    }
+    if consolidated and source.consolidated_as_of:
+        # Shown next to the citation: this is the text as amended, as of this date.
+        metadata["consolidated_as_of"] = source.consolidated_as_of
+    return metadata
 
 
 def _base_metadata(source: DocumentSource, article: Article) -> dict[str, str]:
     metadata = {
         "source": source.slug,
         "article": article.number,
-        **_provenance(source, f"art_{article.number}"),
+        **_provenance(source, f"art_{article.number}", consolidated=True),
     }
+    amendments = [celex for celex in article.amended_by if celex != source.celex_id]
+    if amendments:
+        metadata["amended_by"] = ",".join(amendments)
     if article.chapter_number is not None:
         metadata["chapter"] = article.chapter_number
     if article.section_number is not None:
@@ -78,12 +90,21 @@ def _paragraph_chunks(
     return chunks
 
 
+def _annex_heading(annex: Annex, point: str | None = None) -> str:
+    heading = f"Annex {annex.number}" + (f", point {point}" if point else "")
+    return f"{heading} — {annex.title}" if annex.title else heading
+
+
 def _annex_chunks(source: DocumentSource, annex: Annex) -> list[IngestChunk]:
     """Same parent/leaf shape as articles: one whole-annex chunk, plus one per point
     when there is more than one, so "Annex III point 5" is retrievable on its own."""
     slug = source.slug
     parent_id = f"{slug}:annex:{annex.number}"
-    base = {"source": slug, "annex": annex.number, **_provenance(source, f"anx_{annex.number}")}
+    base = {
+        "source": slug,
+        "annex": annex.number,
+        **_provenance(source, f"anx_{annex.number}", consolidated=True),
+    }
 
     def with_refs(metadata: dict[str, str], text: str) -> dict[str, str]:
         refs = extract_cross_references(text)
@@ -95,7 +116,7 @@ def _annex_chunks(source: DocumentSource, annex: Annex) -> list[IngestChunk]:
         IngestChunk(
             chunk_id=parent_id,
             document_id=slug,
-            content=f"Annex {annex.number} — {annex.title}\n\n{annex.full_text}",
+            content=f"{_annex_heading(annex)}\n\n{annex.full_text}",
             # Annex titles carry the reference that brings them into force ("... referred
             # to in Article 6(2)"), so the title is scanned too.
             metadata=with_refs(dict(base), f"{annex.title}\n{annex.full_text}"),
@@ -105,7 +126,7 @@ def _annex_chunks(source: DocumentSource, annex: Annex) -> list[IngestChunk]:
         for item in annex.items:
             # The heading and annex title ride along in the text so a leaf embeds with
             # its context ("point 5" alone says little).
-            header = f"Annex {annex.number}, point {item.key} — {annex.title}"
+            header = _annex_heading(annex, item.key)
             body = f"{item.heading}\n{item.text}" if item.heading else item.text
             chunks.append(
                 IngestChunk(

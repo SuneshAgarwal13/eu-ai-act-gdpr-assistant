@@ -19,16 +19,24 @@ _HEADERS = {
 
 
 def fetch_document_xhtml(
-    source: DocumentSource, cache_dir: Path, *, force_refresh: bool = False
+    source: DocumentSource,
+    cache_dir: Path,
+    *,
+    force_refresh: bool = False,
+    consolidated: bool = False,
 ) -> str:
     """Fetches a document's XHTML from the CELLAR API, disk-caching the raw response
-    so a resumed run never refetches a document it already has."""
-    cache_path = cache_dir / f"{source.slug}.xhtml"
+    so a resumed run never refetches a document it already has. `consolidated` fetches
+    the source's consolidated version instead of its Official Journal text."""
+    celex_id = source.consolidated_celex if consolidated else source.celex_id
+    if celex_id is None:
+        raise ValueError(f"{source.slug} has no consolidated version configured")
+    cache_path = cache_dir / f"{source.slug}{'.consolidated' if consolidated else ''}.xhtml"
 
     if not force_refresh and cache_path.exists():
         return cache_path.read_text(encoding="utf-8")
 
-    url = CELLAR_URL_TEMPLATE.format(celex_id=source.celex_id)
+    url = CELLAR_URL_TEMPLATE.format(celex_id=celex_id)
     with httpx.Client(follow_redirects=True, timeout=30.0) as client:
         response = client.get(url, headers=_HEADERS)
         response.raise_for_status()

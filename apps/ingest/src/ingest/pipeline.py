@@ -57,6 +57,16 @@ def _upsert_chunks(
                     "metadata": Jsonb(chunk.metadata),
                 },
             )
+        # A re-ingest must also drop provisions that no longer exist (an amendment
+        # deleted or renumbered them) — an upsert alone would keep serving them.
+        cur.execute(
+            "DELETE FROM chunks WHERE document_id = %(document_id)s"
+            " AND NOT (chunk_id = ANY(%(chunk_ids)s))",
+            {
+                "document_id": chunks[0].document_id,
+                "chunk_ids": [chunk.chunk_id for chunk in chunks],
+            },
+        )
     conn.commit()
     return len(chunks)
 
@@ -75,8 +85,26 @@ def ingest_document(
     test to keep a real fetch fast, not a normal production knob)."""
     xhtml = fetch_document_xhtml(source, cache_dir, force_refresh=force_refresh)
     logger.info("ingest.document_fetched", source=source.slug, bytes=len(xhtml))
+    doc = parse_document(xhtml, source)
 
-    doc = _truncate(parse_document(xhtml, source), max_items)
+    if source.consolidated_celex:
+        consolidated = parse_document(
+            fetch_document_xhtml(source, cache_dir, force_refresh=force_refresh, consolidated=True),
+            source,
+        )
+        doc = ParsedDocument(
+            source=source,
+            articles=consolidated.articles,
+            recitals=doc.recitals,
+            annexes=consolidated.annexes,
+        )
+        logger.info(
+            "ingest.consolidated_version", source=source.slug, celex=source.consolidated_celex
+        )
+    if source.recitals_only:
+        doc = ParsedDocument(source=source, recitals=doc.recitals)
+
+    doc = _truncate(doc, max_items)
     logger.info(
         "ingest.articles_parsed",
         source=source.slug,

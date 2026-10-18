@@ -206,3 +206,77 @@ def test_every_chunk_links_back_to_eurlex() -> None:
     assert {c.metadata["source_url"] for c in chunks if c.metadata.get("annex") == "III"} == {
         "https://eur-lex.europa.eu/eli/reg/2024/1689/oj/eng#anx_III"
     }
+
+
+# EUR-Lex consolidated markup: "norm"/"grid-list" classes, letter-suffixed articles,
+# "1a." paragraph labels, and ▼ markers naming the amending act.
+_CONSOLIDATED_XHTML = """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+<div id="cpt_III">
+  <p class="title-division-1">CHAPTER III</p>
+  <p class="title-division-2">HIGH-RISK AI SYSTEMS</p>
+  <div class="eli-subdivision" id="art_6">
+    <p class="title-article-norm">Article 6</p>
+    <div class="eli-title" id="art_6.tit_1">
+      <p class="stitle-article-norm">Classification rules</p>
+    </div>
+    <div class="norm"><span class="no-parag">1.  </span>
+      <div class="norm inline-element">Original paragraph.</div></div>
+    <p class="modref"><a href="http://publications.europa.eu/resource/celex/32026R1744">▼M1</a></p>
+    <div class="norm"><span class="no-parag">1a.  </span>
+      <div class="norm inline-element">Inserted paragraph.</div></div>
+  </div>
+  <div class="eli-subdivision" id="art_6a">
+    <p class="title-article-norm">Article 6a</p>
+    <div class="eli-title" id="art_6a.tit_1"><p class="stitle-article-norm">New article</p></div>
+    <p class="norm">Unnumbered body.</p>
+  </div>
+</div>
+<div id="anx_VII">
+  <p class="title-annex-1">ANNEX VII</p>
+  <p class="title-annex-2">Quality management</p>
+  <p class="title-gr-seq-level-1">3. Quality management system</p>
+  <div>3.1. The application shall include:</div>
+  <div class="grid-container grid-list">
+    <div class="list grid-list-column-1"><span>(a) </span></div>
+    <div class="grid-list-column-2"><p class="norm">the name of the provider;</p></div>
+  </div>
+</div>
+</body></html>"""
+
+
+def test_parse_document_reads_consolidated_markup() -> None:
+    doc = parse_document(_CONSOLIDATED_XHTML, TEST_SOURCE)
+
+    article_6, article_6a = doc.articles
+    assert article_6.chapter_title == "HIGH-RISK AI SYSTEMS"
+    assert article_6.title == "Classification rules"
+    assert [(p.number, p.text) for p in article_6.paragraphs] == [
+        ("1", "1. Original paragraph."),
+        ("1a", "1a. Inserted paragraph."),
+    ]
+    assert article_6.amended_by == ("32026R1744",)
+    assert article_6a.number == "6a"
+    assert [p.text for p in article_6a.paragraphs] == ["Unnumbered body."]
+    # Sibling point (a) folds back into the numbered point it belongs to.
+    (item,) = doc.annexes[0].items
+    assert item.key == "3.1"
+    assert item.text.endswith("(a) the name of the provider;")
+
+
+def test_consolidated_chunks_link_to_the_consolidated_version() -> None:
+    source = DocumentSource(
+        slug="eu_ai_act",
+        name="AI Act",
+        celex_id="32024R1689",
+        eli_uri="http://data.europa.eu/eli/reg/2024/1689/oj",
+        consolidated_celex="02024R1689-20260727",
+    )
+    chunks = {c.chunk_id: c for c in build_chunks(parse_document(_CONSOLIDATED_XHTML, source))}
+
+    metadata = chunks["eu_ai_act:article:6:paragraph:1a"].metadata
+    assert metadata["source_url"] == (
+        "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:02024R1689-20260727#art_6"
+    )
+    assert metadata["consolidated_as_of"] == "2026-07-27"
+    assert metadata["amended_by"] == "32026R1744"

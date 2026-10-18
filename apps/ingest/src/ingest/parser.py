@@ -9,7 +9,8 @@ from ingest.documents import DocumentSource
 
 _CHAPTER_ID_RE = re.compile(r"^cpt_[IVXLCDM]+$")
 _SECTION_ID_RE = re.compile(r"^cpt_[IVXLCDM]+\.sct_(\d+)$")
-_ARTICLE_ID_RE = re.compile(r"^art_(\d+)$")
+# Consolidated texts insert articles between existing ones ("4a", "75b").
+_ARTICLE_ID_RE = re.compile(r"^art_(\d+[a-z]?)$")
 _RECITAL_ID_RE = re.compile(r"^rct_(\d+)$")
 _ARTICLE_PARAGRAPH_ID_RE = re.compile(r"^(\d+)\.(\d+)$")
 _ANNEX_ID_RE = re.compile(r"^anx_([IVXLCDM]+)$")
@@ -18,6 +19,8 @@ _ANNEX_ID_RE = re.compile(r"^anx_([IVXLCDM]+)$")
 _ANNEX_HEADING_KEY_RE = re.compile(r"^(?:Section\s+([A-Z0-9]+)\b|(\d+)\.)")
 _ANNEX_ITEM_LABEL_RE = re.compile(r"^\(?([0-9]+(?:\.[0-9]+)*|[a-z])\)?\.?$")
 _LEADING_NUMBER_RE = re.compile(r"^(\d+(?:\.\d+)*)\.\s")
+_CONSOLIDATED_PARAGRAPH_LABEL_RE = re.compile(r"^(\d+[a-z]?)\.$")
+_CELEX_HREF_RE = re.compile(r"/celex/(\w+)$")
 
 
 @dataclass(frozen=True)
@@ -46,6 +49,8 @@ class Article:
     section_number: str | None
     section_title: str | None
     paragraphs: list[Paragraph] = field(default_factory=list)
+    # CELEX ids of the acts that amended this article (consolidated texts only).
+    amended_by: tuple[str, ...] = ()
 
     @property
     def full_text(self) -> str:
@@ -94,6 +99,13 @@ def _text(tag: Tag | None) -> str:
     if tag is None:
         return ""
     return " ".join(tag.get_text(" ", strip=True).split())
+
+
+def _classes(tag: Tag) -> set[str]:
+    # The lxml-xml parser doesn't split `class` into a list the way the HTML parsers
+    # do, so a tag with "list grid-list-column-1" comes back as one string.
+    value = tag.get("class") or ""
+    return set(value.split() if isinstance(value, str) else value)
 
 
 def _title_text(div: Tag) -> str:
@@ -147,6 +159,49 @@ def _parse_article_paragraphs(article_div: Tag, article_number: str) -> list[Par
     return [_paragraph_from_container(article_div, None)]
 
 
+# --- Consolidated-text markup --------------------------------------------------------
+# EUR-Lex consolidated versions (CELEX "0..." ids) use a different HTML vocabulary from
+# the Official Journal: "norm"/"grid-list" classes instead of "oj-normal"/<table>, and
+# "modref" markers (▼B, ▼M1) wherever an amending act changed the text.
+
+
+def _is_consolidated(soup: BeautifulSoup) -> bool:
+    return soup.find("p", class_="title-article-norm") is not None
+
+
+def _take_amending_acts(tag: Tag) -> tuple[str, ...]:
+    """Reads the ▼M1-style markers inside `tag` for the CELEX ids of the acts that
+    amended it, then removes the markers so they don't leak into chunk text."""
+    acts: dict[str, None] = {}
+    for marker in tag.select("p.modref"):
+        for anchor in marker.select("a[href]"):
+            if match := _CELEX_HREF_RE.search(anchor["href"]):
+                acts[match.group(1)] = None
+        marker.decompose()
+    return tuple(acts)
+
+
+def _consolidated_paragraphs(article_div: Tag) -> list[Paragraph]:
+    paragraphs: list[Paragraph] = []
+    for child in article_div.find_all("div", class_="norm", recursive=False):
+        label = child.find("span", class_="no-parag", recursive=False)
+        match = _CONSOLIDATED_PARAGRAPH_LABEL_RE.match(_text(label)) if label else None
+        if match is None:
+            continue
+        # Text keeps its "1a." label, as OJ paragraph text does, so the article-level
+        # chunk still reads as numbered paragraphs.
+        paragraphs.append(Paragraph(number=match.group(1), text=_text(child)))
+    if paragraphs:
+        return paragraphs
+    # One unnumbered body: every direct child except the heading, title and markers.
+    body = [
+        child
+        for child in article_div.find_all(recursive=False)
+        if not {"title-article-norm", "eli-title", "modref"} & _classes(child)
+    ]
+    return [Paragraph(number=None, text=" ".join(t for t in map(_text, body) if t))]
+
+
 def _annex_item_key(label: str, heading_key: str | None, heading_is_section: bool) -> str:
     """"5" under no heading -> "5"; "1" under "Section A" -> "A.1"; "(a)" under "1." ->
     "1(a)"; "3.1" under "3." -> "3.1" (the label already carries the heading)."""
@@ -167,8 +222,18 @@ def _parse_annex(div: Tag, number: str) -> Annex:
     plain paragraphs (Annexes VII, X). One walk over the direct children handles all
     three: track the current heading, emit one item per numbered element, and fold
     plain paragraphs under a heading into one item keyed by that heading."""
+    _take_amending_acts(div)
     titles = div.find_all("p", class_="oj-doc-ti", recursive=False)
-    title = _text(titles[1]) if len(titles) > 1 else ""
+    # OJ: two "oj-doc-ti" lines ("ANNEX III", then the title). Consolidated: usually
+    # "title-annex-2", occasionally a second "title-annex-1" (Annex X).
+    consolidated_title = div.find("p", class_="title-annex-2", recursive=False)
+    consolidated_lines = div.find_all("p", class_="title-annex-1", recursive=False)
+    if consolidated_title is not None:
+        title = _text(consolidated_title)
+    elif len(consolidated_lines) > 1:
+        title = _text(consolidated_lines[1])
+    else:
+        title = _text(titles[1]) if len(titles) > 1 else ""
 
     intro_parts: list[str] = []
     items: list[AnnexItem] = []
@@ -180,12 +245,23 @@ def _parse_annex(div: Tag, number: str) -> Annex:
     position = 0  # items under the current heading, for unnumbered lists (Annex II)
 
     def add(key: str, text: str) -> None:
+        # Consolidated texts lay out "3.1. ... shall include:" and its points (a)-(e) as
+        # siblings, where the OJ nests them; fold the points back into their parent.
+        if key_is_letter(key) and items and items[-1].heading == heading and not (
+            key_is_letter(items[-1].key)
+        ):
+            last = items[-1]
+            items[-1] = AnnexItem(key=last.key, heading=last.heading, text=f"{last.text} {text}")
+            return
         # Keys are unique within an annex; a repeat (rare drafting quirk) gets a suffix
         # rather than overwriting its sibling.
         seen[key] = seen.get(key, 0) + 1
         if seen[key] > 1:
             key = f"{key}-{seen[key]}"
         items.append(AnnexItem(key=key, heading=heading, text=text))
+
+    def key_is_letter(key: str) -> bool:
+        return key.isalpha() or key.endswith(")")
 
     def flush_pending() -> None:
         if pending:
@@ -207,10 +283,11 @@ def _parse_annex(div: Tag, number: str) -> Annex:
         return match.group(1) if match else str(position)
 
     for child in div.find_all(recursive=False):
-        classes = child.get("class") or []
-        if child.name == "p" and "oj-doc-ti" in classes:
+        classes = _classes(child)
+        skip = {"oj-doc-ti", "title-annex-1", "title-annex-2", "modref"}
+        if child.name == "hr" or skip & classes:
             continue
-        if child.name == "p" and "oj-ti-grseq-1" in classes:
+        if child.name == "p" and {"oj-ti-grseq-1", "title-gr-seq-level-1"} & classes:
             text = _text(child)
             match = _ANNEX_HEADING_KEY_RE.match(text)
             if match:
@@ -231,14 +308,28 @@ def _parse_annex(div: Tag, number: str) -> Annex:
                 label = item_label(_text(cells[0]), _text(child))
                 add(_annex_item_key(label, heading_key, heading_is_section), _text(child))
             continue
-        if child.name == "div" and "oj-enumeration-spacing" in classes:
+        if child.name == "div" and "grid-container" in classes:
+            position += 1
+            label_div = child.select_one("div.grid-list-column-1")
+            add(
+                _annex_item_key(
+                    item_label(_text(label_div), _text(child)), heading_key, heading_is_section
+                ),
+                _text(child),
+            )
+            continue
+        if child.name == "div":  # "oj-enumeration-spacing" (OJ) or a bare item div
             position += 1
             text = _text(child)
+            if not text:
+                continue
             label = item_label("", text)
             add(_annex_item_key(label, heading_key, heading_is_section), text)
             continue
         if child.name == "p":
             text = _text(child)
+            if not text:
+                continue
             if heading is None:
                 intro_parts.append(text)
             else:
@@ -248,13 +339,23 @@ def _parse_annex(div: Tag, number: str) -> Annex:
     return Annex(number=number, title=title, intro=" ".join(intro_parts), items=items)
 
 
+def _division_title(div: Tag, consolidated: bool) -> str:
+    if consolidated:
+        return _text(div.find("p", class_="title-division-2", recursive=False))
+    return _title_text(div)
+
+
 def parse_document(xhtml: str, source: DocumentSource) -> ParsedDocument:
     """Parses ELI-compliant XHTML (as served by the CELLAR API — see fetch.py)
     preserving Chapter -> Section -> Article -> Paragraph -> Point nesting, plus
     Recitals and Annexes collected separately. Walks every <div id="..."> in document order,
     tracking current chapter/section as state — a flat preorder scan is sufficient
-    since chapter/section divs always appear before the articles they contain."""
+    since chapter/section divs always appear before the articles they contain.
+
+    Also reads EUR-Lex consolidated versions (detected by their markup), which carry
+    the articles and annexes as amended but no recitals."""
     soup = BeautifulSoup(xhtml, "lxml-xml")
+    consolidated = _is_consolidated(soup)
 
     articles: list[Article] = []
     recitals: list[Recital] = []
@@ -271,12 +372,27 @@ def parse_document(xhtml: str, source: DocumentSource) -> ParsedDocument:
 
         if _CHAPTER_ID_RE.match(div_id):
             current_chapter_number = div_id.removeprefix("cpt_")
-            current_chapter_title = _title_text(div)
+            current_chapter_title = _division_title(div, consolidated)
             current_section_number = None
             current_section_title = None
         elif section_match := _SECTION_ID_RE.match(div_id):
             current_section_number = section_match.group(1)
-            current_section_title = _title_text(div)
+            current_section_title = _division_title(div, consolidated)
+        elif consolidated and "eli-subdivision" in classes and (
+            article_match := _ARTICLE_ID_RE.match(div_id)
+        ):
+            articles.append(
+                Article(
+                    number=article_match.group(1),
+                    title=_text(div.find("p", class_="stitle-article-norm")),
+                    chapter_number=current_chapter_number,
+                    chapter_title=current_chapter_title,
+                    section_number=current_section_number,
+                    section_title=current_section_title,
+                    amended_by=_take_amending_acts(div),
+                    paragraphs=_consolidated_paragraphs(div),
+                )
+            )
         elif "eli-subdivision" in classes and (article_match := _ARTICLE_ID_RE.match(div_id)):
             number = article_match.group(1)
             title = _text(div.find("p", class_="oj-sti-art")) or _title_text(div)
