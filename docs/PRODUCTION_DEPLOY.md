@@ -23,7 +23,12 @@ billing is ~50 active hours a month, far above a demo's traffic. It needs a bill
 account with a card, so three guardrails are part of the config, not optional:
 
 - `--max-instances 1` — the ceiling on concurrent spend, whatever the traffic.
-- `--min-instances 0` — scale to zero; idle time is free. Cost: a ~10–20 s cold start.
+- `--min-instances 0` — scale to zero; idle time is free. Cost: a cold start, measured at
+  **~80 s** to the first `/health` on 2026-10-18 (pulling the 2.6 GB image from GHCR, which
+  gets no Cloud Run image streaming, then importing torch and loading `bge-small` on one
+  vCPU), with responses still slow for a couple of minutes after. `--cpu-boost` gives the
+  instance extra CPU while it starts; the web app also pings `/health` when the landing
+  page loads, so the instance is usually booting before the first question is asked.
 - A **$1 budget alert** on the billing account.
 
 The image lives on **public GHCR**, not Artifact Registry: Cloud Run pulls public GHCR
@@ -52,7 +57,7 @@ count stays under six.
 gcloud run deploy ai-lab-api \
   --image ghcr.io/suneshagarwal13/ai-lab-api:<sha> \
   --region europe-west1 --allow-unauthenticated \
-  --memory 1Gi --cpu 1 --min-instances 0 --max-instances 1 \
+  --memory 1Gi --cpu 1 --cpu-boost --min-instances 0 --max-instances 1 \
   --concurrency 20 --timeout 300 \
   --startup-probe httpGet.path=/health,initialDelaySeconds=0,timeoutSeconds=5,periodSeconds=10,failureThreshold=12 \
   --set-env-vars APP_ENV=production,FRONTEND_ORIGIN=https://<vercel-domain>,CLIENT_IP_HEADER=x-forwarded-for,TRUSTED_PROXY_HOPS=<n>,LIVE_QUERY_RATE_LIMIT_PER_HOUR=30 \
@@ -159,15 +164,19 @@ export DATABASE_URL="<neon-direct-connection-string>"   # no "-pooler" in the ho
 uv run --package ingest python -m ingest.cli ingest-corpus
 ```
 
-This single command runs the Alembic migration (idempotent) and then ingests both the
-EU AI Act and GDPR (idempotent — `INSERT ... ON CONFLICT (chunk_id) DO UPDATE`, safe to
-re-run any time, e.g. after a source document change). Expect:
+This single command runs the Alembic migrations (idempotent; 0002 adds the full-text
+column used by hybrid retrieval) and then ingests the whole corpus (idempotent —
+`INSERT ... ON CONFLICT (chunk_id) DO UPDATE`, and chunks that no longer exist in a
+document are deleted, so it is safe to re-run after any source change). See ADR 0008 for
+what the corpus holds. Expect:
 
-- **~1,437 chunks** total (793 EU AI Act: 113 articles, 180 recitals; 644 GDPR: 99
-  articles, 173 recitals)
-- ~6s model load + ~25s CPU encode time, but **a few minutes wall time overall** — the
-  1,437 individual upsert round-trips to Neon over the network dominate, not the local
-  embedding step
+- **~2,457 chunks**, ~28 MB with indexes: 1,709 binding (AI Act as consolidated on
+  2026-07-27, incl. 13+1 annexes; the 47 recitals of Reg. (EU) 2026/1744; GDPR), 743
+  guidance (9 Commission/EDPB documents), 5 status-note sections
+- a few minutes wall time — the guidance PDFs are fetched once and cached under
+  `apps/ingest/.cache/`, and the per-chunk upsert round trips to Neon dominate
+- an `ingest.status_note_stale` warning if any note in `apps/ingest/status/` is over 90
+  days old: re-check its sources and update `as_of` before deploying
 - **$0 cost** (local CPU compute, Neon free-tier writes)
 
 ### Verify
@@ -175,8 +184,8 @@ re-run any time, e.g. after a source document change). Expect:
 In the Neon SQL console (or `psql "<direct-or-pooled-url>"`):
 
 ```sql
-SELECT count(*) FROM chunks;
--- ~1437
+SELECT metadata->>'authority' AS authority, count(*) FROM chunks GROUP BY 1;
+-- binding ~1709, guidance ~743, status 5
 ```
 
 Remember: `DATABASE_URL` you export locally for this command is the **direct** string;
