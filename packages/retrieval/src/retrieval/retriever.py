@@ -6,6 +6,8 @@ from pgvector import Vector
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from retrieval.references import referenced_chunk_ids
+
 
 def _build_where_clause(filters: Filters | None) -> tuple[str, dict[str, Any]]:
     """Translates a Filters object into a SQL WHERE clause + bound params — filtering
@@ -39,18 +41,52 @@ def _build_where_clause(filters: Filters | None) -> tuple[str, dict[str, Any]]:
     return " AND ".join(clauses), params
 
 
-class PgVectorRetriever:
-    """core.ports.Retriever backed by pgvector cosine similarity search — see ADR
-    0002. Vector-only: hybrid vector+full-text-search+RRF fusion is future work, not
-    needed to satisfy the Retriever port's contract today."""
+# Each ranker's candidate pool before fusion: deep enough that a chunk ranked modestly
+# by both still surfaces, shallow enough to stay a single fast query.
+_CANDIDATES = 50
+# Reciprocal rank fusion constant; 60 is the value from the original RRF paper and the
+# common default — it flattens the gap between rank 1 and rank 5 of either list.
+_RRF_K = 60
+# Provisions named outright in the question are put first, up to this many, so a long
+# list of references can't crowd out everything similarity search found.
+_MAX_EXPLICIT = 4
+# ts_rank_cd normalization bitmask (Postgres docs, "Ranking Search Results"). On the dev
+# split, length normalization (1, 2, 32) never beat none (0); see ADR 0007.
+_TS_NORMALIZATION = 0
+# Full-text ranking's weight against the vector ranking in the fusion. At 1.0 keyword
+# matches on long articles crowded out the precise paragraph; 0.5 was best on dev.
+_FTS_WEIGHT = 0.5
+# Default score multipliers by source kind, tuned on the dev split (ADR 0007): an
+# operative provision should outrank the recital or guidance paragraph restating it.
+# Status notes stay at 1.0 — for "has this been amended?" they are often the only source.
+DEFAULT_AUTHORITY_WEIGHTS = {"recital": 0.8, "guidance": 0.7, "status": 1.0}
 
-    def __init__(self, pool: AsyncConnectionPool, embedder: Embedder) -> None:
+
+class PgVectorRetriever:
+    """core.ports.Retriever over the pgvector chunks table — see ADR 0002 and 0007.
+
+    Hybrid: a vector-similarity ranking and a Postgres full-text ranking, fused with
+    reciprocal rank fusion in one SQL statement. Full text catches what a 384-dim
+    embedding blurs — exact legal terms ("creditworthiness", "DPIA") and numbers.
+    Provisions the question names outright (retrieval.references) are fetched by id and
+    put first. `authority_weights` scales the fused score by source kind ("recital",
+    "guidance", "status"; anything else 1.0) so an operative article isn't outranked by
+    the recital or guidance paragraph that paraphrases it."""
+
+    def __init__(
+        self,
+        pool: AsyncConnectionPool,
+        embedder: Embedder,
+        authority_weights: dict[str, float] | None = None,
+    ) -> None:
         self._pool = pool
         self._embedder = embedder
+        self._weights = {**DEFAULT_AUTHORITY_WEIGHTS, **(authority_weights or {})}
 
     async def retrieve(self, query: Query) -> list[ScoredChunk]:
         query_vector = await self._embedder.embed_query(query.text)
         where_sql, where_params = _build_where_clause(query.filters)
+        explicit_ids = referenced_chunk_ids(query.text)
 
         async with (
             self._pool.connection() as conn,
@@ -58,11 +94,48 @@ class PgVectorRetriever:
         ):
             await cur.execute(
                 f"""
-                SELECT chunk_id, document_id, content, metadata,
-                       1 - (embedding <=> %(query_vector)s) AS score
-                FROM chunks
-                WHERE {where_sql}
-                ORDER BY embedding <=> %(query_vector)s
+                WITH q AS (
+                    -- plainto_tsquery ANDs every word, which a full question almost never
+                    -- satisfies; OR them and let ts_rank_cd reward chunks matching more.
+                    SELECT NULLIF(replace(plainto_tsquery('english', %(text)s)::text,
+                                          ' & ', ' | '), '')::tsquery AS tsq
+                ),
+                vec AS (
+                    SELECT chunk_id,
+                           row_number() OVER (ORDER BY embedding <=> %(query_vector)s) AS rank
+                    FROM chunks
+                    WHERE {where_sql}
+                    ORDER BY embedding <=> %(query_vector)s
+                    LIMIT %(candidates)s
+                ),
+                fts AS (
+                    SELECT chunk_id,
+                           row_number() OVER (
+                               ORDER BY ts_rank_cd(tsv, q.tsq, %(ts_norm)s) DESC
+                           ) AS rank
+                    FROM chunks, q
+                    WHERE q.tsq IS NOT NULL AND tsv @@ q.tsq AND {where_sql}
+                    ORDER BY ts_rank_cd(tsv, q.tsq, %(ts_norm)s) DESC
+                    LIMIT %(candidates)s
+                ),
+                fused AS (
+                    SELECT chunk_id, sum(weight / (%(rrf_k)s + rank)) AS rrf
+                    FROM (
+                        SELECT chunk_id, rank, 1.0 AS weight FROM vec
+                        UNION ALL
+                        SELECT chunk_id, rank, %(fts_weight)s AS weight FROM fts
+                    ) ranked
+                    GROUP BY chunk_id
+                )
+                SELECT c.chunk_id, c.document_id, c.content, c.metadata,
+                       f.rrf * CASE
+                           WHEN c.metadata ? 'recital' THEN %(w_recital)s
+                           WHEN c.metadata->>'authority' = 'guidance' THEN %(w_guidance)s
+                           WHEN c.metadata->>'authority' = 'status' THEN %(w_status)s
+                           ELSE 1.0
+                       END AS score
+                FROM fused f JOIN chunks c USING (chunk_id)
+                ORDER BY score DESC
                 LIMIT %(top_k)s
                 """,
                 # pgvector-python only adapts its own Vector wrapper (or numpy arrays)
@@ -73,21 +146,50 @@ class PgVectorRetriever:
                 # vector <=> double precision[]" failure.
                 {
                     "query_vector": Vector(query_vector),
+                    "text": query.text,
+                    "candidates": max(_CANDIDATES, query.top_k),
+                    "rrf_k": _RRF_K,
+                    "ts_norm": _TS_NORMALIZATION,
+                    "fts_weight": _FTS_WEIGHT,
+                    "w_recital": self._weights["recital"],
+                    "w_guidance": self._weights["guidance"],
+                    "w_status": self._weights["status"],
                     "top_k": query.top_k,
                     **where_params,
                 },
             )
-            rows = await cur.fetchall()
+            ranked = [_to_scored(row, float(row["score"])) for row in await cur.fetchall()]
 
-        return [
-            ScoredChunk(
-                chunk=Chunk(
-                    id=row["chunk_id"],
-                    document_id=row["document_id"],
-                    text=row["content"],
-                    metadata=row["metadata"],
-                ),
-                score=row["score"],
-            )
-            for row in rows
-        ]
+            explicit: list[ScoredChunk] = []
+            if explicit_ids:
+                await cur.execute(
+                    f"""
+                    SELECT chunk_id, document_id, content, metadata
+                    FROM chunks
+                    WHERE chunk_id = ANY(%(ids)s) AND {where_sql}
+                    """,
+                    {"ids": explicit_ids, **where_params},
+                )
+                found = {row["chunk_id"]: row for row in await cur.fetchall()}
+                # Scored just above the best fused result, in the order named, so the
+                # list still descends by score as the Retriever port requires.
+                top = ranked[0].score if ranked else 0.0
+                named = [found[cid] for cid in explicit_ids if cid in found][:_MAX_EXPLICIT]
+                explicit = [
+                    _to_scored(row, top + (len(named) - i) * 1e-3) for i, row in enumerate(named)
+                ]
+
+        pinned = {sc.chunk.id for sc in explicit}
+        return (explicit + [sc for sc in ranked if sc.chunk.id not in pinned])[: query.top_k]
+
+
+def _to_scored(row: dict[str, Any], score: float) -> ScoredChunk:
+    return ScoredChunk(
+        chunk=Chunk(
+            id=row["chunk_id"],
+            document_id=row["document_id"],
+            text=row["content"],
+            metadata=row["metadata"],
+        ),
+        score=score,
+    )
