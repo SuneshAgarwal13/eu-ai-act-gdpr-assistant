@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { NODE_ORDER } from "./graph-layout";
 import { graphReducer, initialGraphVizState, selectTerminal, type Terminal } from "./graph-state";
-import { cachedFixtureFor } from "./replay-client";
+import exampleFixtures from "./example-fixtures.json";
 import type { GraphEvent } from "./types/graph-events.generated";
 
 function replay(events: GraphEvent[]) {
@@ -253,14 +253,7 @@ describe("the never-blank guarantee", () => {
 
   /** Every recorded live run behind the curated examples — the real event shapes off the
    * wire, not synthesized ones. */
-  const FIXTURES: GraphEvent[][] = [
-    "What are the requirements for high-risk AI systems under the EU AI Act?",
-    "What is a data protection impact assessment under GDPR?",
-    "How does the GDPR define personal data?",
-    "How do the fines for AI Act deployer violations compare to GDPR fines?",
-  ]
-    .map((q) => cachedFixtureFor(q))
-    .filter((f): f is GraphEvent[] => f !== undefined);
+  const FIXTURES: GraphEvent[][] = Object.values(exampleFixtures as Record<string, GraphEvent[]>);
 
   const SEQUENCES: GraphEvent[][] = [[], [started], [started, ...fullNodeRun()], ...FIXTURES];
 

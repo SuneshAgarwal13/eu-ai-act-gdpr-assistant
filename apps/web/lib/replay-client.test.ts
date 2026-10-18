@@ -5,7 +5,7 @@ import type { GraphEvent } from "./types/graph-events.generated";
 
 describe("cachedFixtureFor", () => {
   it("resolves the real curated example questions", () => {
-    const fixture = cachedFixtureFor("How does the GDPR define personal data?");
+    const fixture = cachedFixtureFor("Is AI used to decide who gets a loan considered high-risk?");
     expect(fixture).toBeDefined();
     expect(fixture![0]!.type).toBe("graph_started");
   });
@@ -18,7 +18,7 @@ describe("cachedFixtureFor", () => {
 describe("replayCachedQuery", () => {
   it("never touches the network — the whole point of the cached path", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
-    const fixture = cachedFixtureFor("How does the GDPR define personal data?")!;
+    const fixture = cachedFixtureFor("Is AI used to decide who gets a loan considered high-risk?")!;
 
     const events: GraphEvent[] = [];
     for await (const event of replayCachedQuery(fixture)) events.push(event);
@@ -29,7 +29,7 @@ describe("replayCachedQuery", () => {
   });
 
   it("stops yielding once the signal is aborted", async () => {
-    const fixture = cachedFixtureFor("How does the GDPR define personal data?")!;
+    const fixture = cachedFixtureFor("Is AI used to decide who gets a loan considered high-risk?")!;
     const controller = new AbortController();
 
     const events: GraphEvent[] = [];

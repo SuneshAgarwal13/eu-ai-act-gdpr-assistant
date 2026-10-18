@@ -7,15 +7,18 @@ interface Example {
   kind: "cited" | "abstain";
 }
 
+// One per thing the corpus covers: obligations, an annex, official guidance, the 2026
+// amendment, the AI Act/GDPR interplay, and an honest abstention.
 const EXAMPLES: Example[] = [
   { question: "What are the requirements for high-risk AI systems under the EU AI Act?", kind: "cited" },
-  { question: "What is a data protection impact assessment under GDPR?", kind: "cited" },
-  { question: "How does the GDPR define personal data?", kind: "cited" },
-  { question: "How do the fines for AI Act deployer violations compare to GDPR fines?", kind: "abstain" },
+  { question: "Is AI used to decide who gets a loan considered high-risk?", kind: "cited" },
+  { question: "According to the EDPB, when is a company 'aware' of a personal data breach?", kind: "cited" },
+  { question: "Have the AI Act's deadlines for high-risk AI systems been postponed?", kind: "cited" },
   {
     question: "If my AI system is also a GDPR data processor, does the AI Act override my GDPR breach notification deadline?",
-    kind: "abstain",
+    kind: "cited",
   },
+  { question: "What does the California Consumer Privacy Act say about deleting data?", kind: "abstain" },
 ];
 
 export function ExampleQuestions({ onAsk }: { onAsk: (question: string) => void }) {
