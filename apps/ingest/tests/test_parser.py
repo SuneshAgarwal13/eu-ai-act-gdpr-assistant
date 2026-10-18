@@ -225,6 +225,7 @@ _CONSOLIDATED_XHTML = """<?xml version="1.0" encoding="UTF-8"?>
     <p class="modref"><a href="http://publications.europa.eu/resource/celex/32026R1744">▼M1</a></p>
     <div class="norm"><span class="no-parag">1a.  </span>
       <div class="norm inline-element">Inserted paragraph.</div></div>
+    <p class="norm">Its continuation, which must stay with 1a.</p>
   </div>
   <div class="eli-subdivision" id="art_6a">
     <p class="title-article-norm">Article 6a</p>
@@ -253,7 +254,7 @@ def test_parse_document_reads_consolidated_markup() -> None:
     assert article_6.title == "Classification rules"
     assert [(p.number, p.text) for p in article_6.paragraphs] == [
         ("1", "1. Original paragraph."),
-        ("1a", "1a. Inserted paragraph."),
+        ("1a", "1a. Inserted paragraph. Its continuation, which must stay with 1a."),
     ]
     assert article_6.amended_by == ("32026R1744",)
     assert article_6a.number == "6a"

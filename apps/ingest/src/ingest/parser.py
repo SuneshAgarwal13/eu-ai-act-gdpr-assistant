@@ -182,24 +182,34 @@ def _take_amending_acts(tag: Tag) -> tuple[str, ...]:
 
 
 def _consolidated_paragraphs(article_div: Tag) -> list[Paragraph]:
-    paragraphs: list[Paragraph] = []
-    for child in article_div.find_all("div", class_="norm", recursive=False):
+    """A numbered paragraph is a <div class="norm"> with a "1a." label, but its
+    continuation — further subparagraphs, point lists — follows as *sibling* elements
+    rather than inside it (Article 11(1)'s "It shall contain ... Annex IV" sentence is
+    one), so content is attached to the most recent numbered paragraph in document
+    order. An article with no numbered paragraph is one unnumbered body."""
+    numbers: list[str | None] = []
+    texts: list[list[str]] = []
+    for child in article_div.find_all(recursive=False):
+        if {"title-article-norm", "eli-title", "modref"} & _classes(child):
+            continue
         label = child.find("span", class_="no-parag", recursive=False)
         match = _CONSOLIDATED_PARAGRAPH_LABEL_RE.match(_text(label)) if label else None
-        if match is None:
-            continue
-        # Text keeps its "1a." label, as OJ paragraph text does, so the article-level
-        # chunk still reads as numbered paragraphs.
-        paragraphs.append(Paragraph(number=match.group(1), text=_text(child)))
-    if paragraphs:
-        return paragraphs
-    # One unnumbered body: every direct child except the heading, title and markers.
-    body = [
-        child
-        for child in article_div.find_all(recursive=False)
-        if not {"title-article-norm", "eli-title", "modref"} & _classes(child)
+        if match is not None:
+            numbers.append(match.group(1))
+            texts.append([])
+        elif not texts:
+            numbers.append(None)  # body text before any numbered paragraph
+            texts.append([])
+        if text := _text(child):
+            # Text keeps its "1a." label, as OJ paragraph text does, so the
+            # article-level chunk still reads as numbered paragraphs.
+            texts[-1].append(text)
+    paragraphs = [
+        Paragraph(number=number, text=" ".join(parts))
+        for number, parts in zip(numbers, texts, strict=True)
+        if parts
     ]
-    return [Paragraph(number=None, text=" ".join(t for t in map(_text, body) if t))]
+    return paragraphs or [Paragraph(number=None, text="")]
 
 
 def _annex_item_key(label: str, heading_key: str | None, heading_is_section: bool) -> str:
