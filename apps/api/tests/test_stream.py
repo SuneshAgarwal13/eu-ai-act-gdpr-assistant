@@ -65,14 +65,14 @@ def _review_gateway() -> Gateway:
     return Gateway(redis_client=FakeAsyncRedis(), completion_fn=completion_fn)
 
 
-def _always_retry_gateway() -> Gateway:
+def _always_retry_gateway(confidence: float = 0.5) -> Gateway:
     """Critic always fails, reproducing the hard-cap retry-loop scenario already
     covered non-streaming in test_graph.py's test_graph_loops_up_to_cap_then_pauses_at_hitl_gate."""
     planner_payload = json.dumps(
         {"rewritten_query": "what is x?", "intent": "factual_lookup", "retry_budget": 2}
     )
     generated_payload = json.dumps(
-        {"answer": "stub answer", "citations": [], "confidence": 0.5, "abstained": False}
+        {"answer": "stub answer", "citations": [], "confidence": confidence, "abstained": False}
     )
     critic_payload = json.dumps({"faithful": False, "reason": "stub: always retry"})
 
@@ -175,20 +175,37 @@ async def test_normal_query_emits_full_node_sequence_with_token_usage() -> None:
 async def test_retry_loop_emitted_and_capped() -> None:
     events = await _run(_always_retry_gateway(), "stream-2", max_retries=2)
 
+    # cap=2 permits 2 critic passes: retry_count reaches 1 -> loop, reaches 2 -> cap hit.
+    # Only the first pass loops, so only it emits retry_loop.
     retry_events = [e for e in events if e.type == "retry_loop"]
-    assert [e.retry_count for e in retry_events] == [1, 2]
+    assert [e.retry_count for e in retry_events] == [1]
+    assert retry_events[0].to_node is NodeName.GENERATOR
 
     run_ids_by_node: dict[NodeName, set[str]] = {}
     for e in events:
         if e.type == "node_started":
             run_ids_by_node.setdefault(e.node, set()).add(e.run_id)
-    for node in (NodeName.RETRIEVER, NodeName.RERANKER, NodeName.GENERATOR, NodeName.CRITIC):
-        # retry_count is incremented before route_after_critic's cap check (see
-        # api.graph.nodes.route_after_critic), so cap=2 permits exactly 2 total
-        # passes (retry_count reaches 1 -> loop, reaches 2 -> cap hit, proceed).
+    # A retry revises the draft against the same chunks: retrieval runs once.
+    for node in (NodeName.RETRIEVER, NodeName.RERANKER):
+        assert len(run_ids_by_node[node]) == 1
+    for node in (NodeName.GENERATOR, NodeName.CRITIC):
         assert len(run_ids_by_node[node]) == 2
 
-    assert events[-1].type == "graph_interrupted"  # cap hit -> low confidence -> review gate
+    # Critic still unsatisfied at the cap -> review gate, carrying the critic's note.
+    assert events[-1].type == "graph_interrupted"
+    assert events[-1].interrupt["critic_feedback"]
+
+
+@pytest.mark.asyncio
+async def test_critic_rejection_at_cap_overrides_high_confidence() -> None:
+    """Regression: a draft the critic still rejects after the retry cap used to pass
+    hitl_gate on the generator's own confidence and ship as approved."""
+    events = await _run(_always_retry_gateway(confidence=0.95), "stream-cap", max_retries=2)
+
+    assert not any(e.type == "graph_completed" for e in events)
+    assert events[-1].type == "graph_interrupted"
+    assert events[-1].interrupt["type"] == "review"
+    assert events[-1].interrupt["critic_feedback"] == "stub: always retry"
 
 
 @pytest.mark.asyncio

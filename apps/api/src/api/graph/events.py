@@ -74,8 +74,9 @@ class NodeCompletedEvent(BaseModel):
 
 
 class RetryLoopEvent(BaseModel):
-    """Fired when the critic decides to loop back to the retriever — the backward edge
-    the frontend needs to animate distinctly from the normal forward flow. Derived from
+    """Fired when the critic sends the draft back to the generator for revision — the
+    backward edge
+    the frontend animates distinctly from the normal forward flow. Derived from
     the critic node's own result dict (needs_retry=True), not a separate LangGraph
     signal — see api.graph.nodes.make_critic_node."""
 
@@ -85,7 +86,7 @@ class RetryLoopEvent(BaseModel):
     thread_id: str
     emitted_at: float
     from_node: Literal[NodeName.CRITIC] = NodeName.CRITIC
-    to_node: Literal[NodeName.RETRIEVER] = NodeName.RETRIEVER
+    to_node: Literal[NodeName.GENERATOR] = NodeName.GENERATOR
     retry_count: int
     reason: str | None = None
 
@@ -117,6 +118,9 @@ class GraphCompletedEvent(BaseModel):
     confidence: float | None
     abstained: bool
     human_approved: bool | None
+    # True when hitl_gate passed the answer without asking anyone (confidence above
+    # threshold, critic satisfied). human_approved stays None then — no human saw it.
+    auto_approved: bool = False
 
 
 class GraphErrorEvent(BaseModel):
@@ -202,7 +206,10 @@ def critic_payload(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def hitl_gate_payload(result: dict[str, Any]) -> dict[str, Any]:
-    return {"human_approved": result.get("human_approved")}
+    return {
+        "human_approved": result.get("human_approved"),
+        "auto_approved": result.get("auto_approved", False),
+    }
 
 
 NODE_PAYLOAD_BUILDERS: dict[NodeName, Any] = {
