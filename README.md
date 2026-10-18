@@ -52,7 +52,7 @@ flowchart LR
     R --> RR[reranker]
     RR --> G[generator]
     G --> C[critic]
-    C -->|retry| R
+    C -->|revise| G
     C -->|proceed| H
     H --> E[end]
 ```
@@ -61,17 +61,23 @@ Six LangGraph nodes, each one a pure function of typed state:
 
 - **planner** — rewrites the question into a retrieval query, classifies intent, and can
   abstain immediately on out-of-scope questions before spending a single retrieval call.
-- **retriever** — cosine search over pgvector (HNSW index, 384-dim embeddings).
+- **retriever** — hybrid: pgvector cosine search and Postgres full-text search fused by
+  reciprocal rank, with provisions the question names ("Article 5(1)", "Annex III point
+  5") pinned first and guidance weighted below the law it interprets
+  ([ADR 0007](docs/adr/0007-hybrid-retrieval-and-reference-pinning.md)).
 - **reranker** — reorders and truncates to the top 5 chunks the generator will see.
 - **generator** — answers from **only** those chunks, emitting structured output with a
   `citations` list and an `abstained` flag. Citations are validated against the real
   chunk ids in scope; invented ids are stripped, not trusted.
-- **critic** — reviews the draft for unsupported claims and can send the whole thing back
-  to *retrieval*, not just regeneration — if the answer was thin, better chunks are more
-  likely to fix it than another sampling roll. The loop has a hard iteration cap *and* a
-  token budget guard; unbounded loops are treated as bugs.
+- **critic** — checks every claim against the chunks it cites and, on a failure, sends
+  the draft back to the generator *with the unsupported claim named*, to be removed or
+  corrected against the same chunks. (It used to re-run retrieval with an unchanged query,
+  which returned the same chunks and repeated the same claim.) The loop has a hard
+  iteration cap *and* a token budget guard; unbounded loops are treated as bugs.
 - **hitl_gate** — pauses via LangGraph's `interrupt()` for human review when confidence
-  is low, rather than a bespoke pause mechanism.
+  is low **or the critic still rejects the draft at the cap** — the generator grading its
+  own confidence can't overrule the critic. An answer that passes without review is
+  marked `auto_approved`, never `human_approved`.
 
 State is a single typed `AgentState`. Nodes never call each other — the runtime routes.
 The checkpointer is Postgres-backed, so a thread survives a process restart, which
@@ -79,16 +85,24 @@ matters on ephemeral free-tier compute.
 
 ### The corpus
 
-**1,437 chunks**, ingested at article *and* paragraph grain:
+**2,457 chunks**, every one labelled with how much weight it carries
+([ADR 0008](docs/adr/0008-authority-labelled-multi-source-corpus.md)):
 
-| Source | Articles | Recitals | Chunks |
-|---|---:|---:|---:|
-| EU AI Act | 113 | 180 | 793 |
-| GDPR | 99 | 173 | 644 |
+| Authority | Source | Chunks |
+|---|---|---:|
+| binding | EU AI Act **as amended by Reg. (EU) 2026/1744** (EUR-Lex consolidation of 27 July 2026): 119 articles, 14 annexes, 180 recitals | 1,018 |
+| binding | Reg. (EU) 2026/1744 (Digital Omnibus on AI): its 47 recitals | 47 |
+| binding | GDPR (unamended): 99 articles, 173 recitals | 644 |
+| guidance | 3 Commission guidelines (Art. 5 prohibitions, AI-system definition, GPAI scope), 5 EDPB guidelines/opinions, the EDPB-endorsed WP29 DPIA guidelines | 743 |
+| status | dated, sourced notes on amendments adopted or pending | 5 |
 
-Embeddings are `BAAI/bge-small-en-v1.5` computed **locally on CPU** — never a hosted
-embedding API. The ingest is idempotent (`ON CONFLICT DO UPDATE`), so re-running after a
-source change is safe.
+Articles and annexes are chunked at whole-provision *and* paragraph/point grain; guidance
+as runs of its own numbered paragraphs, cited "paras 26–28". Every source links back to
+EUR-Lex or to the guidance PDF at the right page, and the UI says which sources are law
+and which aren't. Embeddings are `BAAI/bge-small-en-v1.5` computed **locally on CPU** —
+never a hosted embedding API. The ingest is idempotent and deletes provisions that no
+longer exist, so re-running after an amendment is safe; status notes older than 90 days
+are flagged at ingest.
 
 ### Every model call goes through one gateway
 
@@ -112,36 +126,52 @@ that's what the live graph on the demo is rendering.
 
 ## What the numbers say
 
-Layer 3 generation scorecard, all 37 golden items. Scorecards are generated artifacts,
-not checked in; `just evals-generation` rewrites them into `evals/reports/`.
+The golden set has 85 items in two splits. **dev** (52) is what prompts, weights and
+thresholds are tuned against; **test** (33) is held out, so its numbers are reported and
+never tuned on. The original 37 items all live in dev. 30 of them name the article in the
+question ("…according to Article 5"), which made retrieval look easier than it is. The
+48 items added in October are phrased the way users ask, and include questions the
+system *must* decline: CCPA, enforcement fines, UK law, Schrems II. Scorecards are
+generated artifacts, not checked in; `just evals-generation` and `just evals-fast`
+rewrite them into `evals/reports/`.
 
-| Metric | Score |
-|---|---|
-| appropriate abstention | 36/37 — 1 false abstention, 0 false answers |
-| **faithfulness** | **0.9877** |
-| answer relevancy | 0.9767 |
-| citation validity | 0.9054 |
-| context precision | 0.1676 ⚠️ |
+**Backtest on the held-out test split**, 2026-10-18. Baseline is `main` (2024 OJ text,
+articles and recitals only, vector-only retrieval) re-ingested into its own database:
 
-That one false abstention is `cand-041`, and it is the most interesting number here —
-see [Known gaps](#known-gaps-honestly). An earlier run scored a flawless 37/37 by
-*answering* it instead. That answer was worse.
+| Generation (Layer 3, 33 items) | baseline | now |
+|---|---:|---:|
+| answered or abstained correctly | 25/33 | **31/33** |
+| false abstention (answerable, declined) | 27.6% | **6.9%** |
+| false answer (must decline, answered) | 0% | 0% |
+| citation validity | 0.962 | **0.988** |
+| faithfulness ⚠️ | 0.965 | **0.989** |
+| answer relevancy | **0.903** | 0.868 |
+| context precision | **0.125** | 0.066 |
 
-Retrieval (Layer 1/2, deterministic, 31 scored items — 6 out-of-scope excluded):
+| Retrieval (29 scored items) | baseline | now |
+|---|---:|---:|
+| hit@1, containment-aware | 0.207 | **0.586** |
+| hit@5, containment-aware | 0.586 | **0.793** |
+| MRR@5, containment-aware | 0.371 | **0.659** |
+| recall@5, strict | **0.342** | 0.172 |
 
-| k | recall@k | MRR@k | nDCG@k |
-|---:|---:|---:|---:|
-| 1 | 0.6290 | 0.6452 | 0.6452 |
-| 3 | 0.9355 | 0.7634 | 0.8072 |
-| 5 | 0.9677 | 0.7699 | 0.8197 |
-| 10 | 1.0000 | 0.7735 | 0.8294 |
+"Containment-aware" counts a retrieved article or annex chunk as covering the paragraph
+or point it holds verbatim. The strict metric falls because hybrid search returns the
+whole provision where the label names one paragraph. Both are reported; see
+[ADR 0007](docs/adr/0007-hybrid-retrieval-and-reference-pinning.md).
 
-Recall@5 used to read 1.0000 here. It dropped when `cand-041` was added — a question the
-system genuinely gets wrong, documented in [Known gaps](#known-gaps-honestly). A golden
-set that only contains questions the system already answers measures nothing, so the
-lower number is the more useful one.
+Two numbers went the wrong way and are kept visible on purpose. **Answer relevancy** fell
+from 0.903 to 0.868. An earlier run of the same branch on the same split scored 0.918, so
+judge noise is part of it, but answers that draw on law *and* guidance are longer, and
+the relevancy judge penalises qualifications. **The faithfulness judge** (fast tier)
+failed to return parseable JSON on 12 of 29 items against the longer article-level
+contexts, so that mean covers 17 items. It needs a stronger judge tier before it can be
+fully trusted.
 
-**About that 0.1676.** It's the one metric that looks broken, and it's the one I'd want
+On dev, after tuning: 52/52 correct abstention decisions, citation validity 1.000,
+faithfulness 0.992, answer relevancy 0.924.
+
+**About context precision.** It's the metric that looks broken, and it's the one I'd want
 to be asked about. It's computed as an exact set intersection between the golden set's
 `relevant_chunk_ids` and the chunk ids actually shown to the generator. Because the
 corpus is chunked at *both* article and paragraph grain, the retriever legitimately
@@ -199,13 +229,33 @@ Cost discipline is a design constraint here, not a postscript.
 
 Deployed on Google Cloud Run (API, scale-to-zero on the always-free tier), Vercel (web),
 Neon (Postgres + pgvector), Upstash (Redis). The first live query after an idle spell
-pays a cold start of roughly 10–20 s; cached example questions never touch the API.
+pays a cold start, measured at ~80 s to first response (a 2.6 GB image pulled from GHCR,
+then torch and the embedder loading on one vCPU). The landing page pings `/health` on
+load, so the instance is usually booting while the visitor reads; cached example
+questions never touch the API.
 
 ---
 
 ## Known gaps, honestly
 
-**The DPO question above is a ranking failure, not a corpus gap.** Article 37(1) *is*
+**Open now:**
+
+- **Annex IV doesn't surface for "what technical documentation must a provider draw
+  up?".** Article 11 does, and its paragraph 1 points to Annex IV, but the annex itself
+  ranks outside the top 20. Postgres full-text ranking has no IDF, so long provider
+  articles that repeat "technical documentation" outrank the annex titled exactly that.
+  Following a retrieved provision's cross-references to the annex it names is the next
+  lever.
+- **Answer relevancy fell on the test split** (0.903 → 0.868; see above), and the
+  fast-tier faithfulness judge can't parse its own output on long contexts.
+- **Status notes are hand-maintained.** They are dated and sourced, ingest warns at 90
+  days, but nobody can re-fetch them.
+
+**Fixed since:** `cand-041` below now passes. Hybrid retrieval returns Article 37 whole,
+which contains 37(1), and the answer cites it. The history is kept because it is the best
+argument in this repo for reading per-item numbers, not just means.
+
+**The DPO question was a ranking failure, not a corpus gap.** Article 37(1) *is*
 indexed. Cosine similarity ranks it **9th** for that query — the paragraphs of Articles
 37 and 38 are so topically similar that the whole top-10 sits inside a 0.026 score band,
 and `bge-small` can't separate them. The top-5 cut then drops the one paragraph that
@@ -260,8 +310,8 @@ mean hides that completely.
 
 After hardening, the model abstains instead, which the abstention metric scores as a
 *failure*. That trade — a worse-looking scorecard for honest behaviour — is the one this
-project exists to make. `cand-041` is left failing on purpose: it marks the boundary of
-what this retrieval stack handles, somewhere it can't be quietly forgotten.
+project exists to make. `cand-041` was left failing on purpose, to mark the boundary of
+what that retrieval stack handled, until a retrieval change (not a prompt change) fixed it.
 
 **Also deferred:** token-by-token answer streaming (the contract streams node-level
 events; true token streaming needs its own ADR covering cache/retry/budget interactions),
