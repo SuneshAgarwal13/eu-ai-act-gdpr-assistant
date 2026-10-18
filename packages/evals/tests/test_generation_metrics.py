@@ -109,3 +109,13 @@ def test_citation_existence_all_present() -> None:
 
 def test_citation_existence_none_present() -> None:
     assert citation_existence(["z"], {"a", "b"}) == pytest.approx(0.0)
+
+
+def test_in_domain_unanswerable_must_abstain_like_out_of_scope() -> None:
+    results = [
+        _result("u1", question_type=QuestionType.IN_DOMAIN_UNANSWERABLE, abstained=False),
+        _result("u2", question_type=QuestionType.IN_DOMAIN_UNANSWERABLE, abstained=True),
+    ]
+    report = appropriate_abstention(results)
+    assert report.false_answer == 1
+    assert report.correct == 1

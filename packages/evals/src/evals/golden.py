@@ -22,7 +22,27 @@ class QuestionType(StrEnum):
     FACTUAL_LOOKUP = "factual_lookup"
     ROLE_SCOPED = "role_scoped"
     CROSS_REFERENCE = "cross_reference"
+    # Spans the AI Act and the GDPR together.
+    CROSS_REGULATION = "cross_regulation"
+    # Answered by official guidance rather than the regulation text.
+    GUIDANCE = "guidance"
     OUT_OF_SCOPE = "out_of_scope"
+    # On-topic for EU AI/data-protection law, but the corpus can't answer it (another
+    # jurisdiction, a law not yet adopted, national specifics). Must abstain, like
+    # OUT_OF_SCOPE, but it's the hard case: retrieval finds plausible-looking text.
+    IN_DOMAIN_UNANSWERABLE = "in_domain_unanswerable"
+
+
+# Items the system should decline to answer; they have no relevant chunks.
+ABSTAIN_TYPES = frozenset({QuestionType.OUT_OF_SCOPE, QuestionType.IN_DOMAIN_UNANSWERABLE})
+
+
+class Split(StrEnum):
+    """dev: tune prompts, weights and thresholds against it. test: report only — never
+    look at per-item test results while tuning (CLAUDE.md)."""
+
+    DEV = "dev"
+    TEST = "test"
 
 
 class Provenance(BaseModel):
@@ -43,6 +63,8 @@ class GoldenItem(BaseModel):
     difficulty: Difficulty
     question_type: QuestionType
     provenance: Provenance
+    # Items predating the split are all dev: they were used to tune earlier changes.
+    split: Split = Split.DEV
 
 
 def load_golden_set(path: Path) -> list[GoldenItem]:

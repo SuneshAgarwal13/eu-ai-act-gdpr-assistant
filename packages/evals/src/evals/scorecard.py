@@ -5,8 +5,14 @@ from statistics import mean
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from evals.golden import Difficulty, GoldenItem, QuestionType
-from evals.metrics import ndcg_at_k, recall_at_k, reciprocal_rank
+from evals.golden import ABSTAIN_TYPES, Difficulty, GoldenItem, QuestionType, Split
+from evals.metrics import (
+    hit_at_k_containing,
+    ndcg_at_k,
+    recall_at_k,
+    reciprocal_rank,
+    reciprocal_rank_containing,
+)
 from telemetry import get_logger
 
 logger = get_logger(__name__)
@@ -20,10 +26,13 @@ class PerItemScore(BaseModel):
     id: str
     question_type: QuestionType
     difficulty: Difficulty
+    split: Split = Split.DEV
     scored: bool
     recall_at_k: dict[int, float] = Field(default_factory=dict)
     reciprocal_rank_at_k: dict[int, float] = Field(default_factory=dict)
     ndcg_at_k: dict[int, float] = Field(default_factory=dict)
+    hit_containing_at_k: dict[int, float] = Field(default_factory=dict)
+    reciprocal_rank_containing_at_k: dict[int, float] = Field(default_factory=dict)
 
 
 class Scorecard(BaseModel):
@@ -32,6 +41,7 @@ class Scorecard(BaseModel):
     schema_version: int = 1
     generated_at: str
     golden_set_path: str
+    split: str = "all"
     retriever_model: str
     reranked: bool = False
     reranker_model: str | None = None
@@ -42,6 +52,8 @@ class Scorecard(BaseModel):
     aggregate_recall_at_k: dict[int, float]
     aggregate_mrr_at_k: dict[int, float]
     aggregate_ndcg_at_k: dict[int, float]
+    aggregate_hit_containing_at_k: dict[int, float] = Field(default_factory=dict)
+    aggregate_mrr_containing_at_k: dict[int, float] = Field(default_factory=dict)
     per_item: list[PerItemScore]
 
 
@@ -51,10 +63,17 @@ def _score_item(item: GoldenItem, retrieved_ids: list[str], k_values: list[int])
         id=item.id,
         question_type=item.question_type,
         difficulty=item.difficulty,
+        split=item.split,
         scored=True,
         recall_at_k={k: recall_at_k(retrieved_ids, relevant_ids, k) for k in k_values},
         reciprocal_rank_at_k={k: reciprocal_rank(retrieved_ids, relevant_ids, k) for k in k_values},
         ndcg_at_k={k: ndcg_at_k(retrieved_ids, relevant_ids, k) for k in k_values},
+        hit_containing_at_k={
+            k: hit_at_k_containing(retrieved_ids, relevant_ids, k) for k in k_values
+        },
+        reciprocal_rank_containing_at_k={
+            k: reciprocal_rank_containing(retrieved_ids, relevant_ids, k) for k in k_values
+        },
     )
 
 
@@ -67,13 +86,14 @@ async def aggregate(
     generated_at: str,
     reranked: bool = False,
     reranker_model: str | None = None,
+    split: str = "all",
 ) -> Scorecard:
     per_item: list[PerItemScore] = []
     out_of_scope_excluded = 0
     max_k = max(k_values) if k_values else 0
 
     for item in golden_items:
-        is_out_of_scope = item.question_type is QuestionType.OUT_OF_SCOPE
+        is_out_of_scope = item.question_type in ABSTAIN_TYPES
         has_ground_truth = bool(item.relevant_chunk_ids)
 
         if is_out_of_scope != (not has_ground_truth):
@@ -91,6 +111,7 @@ async def aggregate(
                     id=item.id,
                     question_type=item.question_type,
                     difficulty=item.difficulty,
+                    split=item.split,
                     scored=False,
                 )
             )
@@ -109,6 +130,7 @@ async def aggregate(
     return Scorecard(
         generated_at=generated_at,
         golden_set_path=golden_set_path,
+        split=split,
         retriever_model=retriever_model,
         reranked=reranked,
         reranker_model=reranker_model,
@@ -119,6 +141,8 @@ async def aggregate(
         aggregate_recall_at_k=_agg("recall_at_k"),
         aggregate_mrr_at_k=_agg("reciprocal_rank_at_k"),
         aggregate_ndcg_at_k=_agg("ndcg_at_k"),
+        aggregate_hit_containing_at_k=_agg("hit_containing_at_k"),
+        aggregate_mrr_containing_at_k=_agg("reciprocal_rank_containing_at_k"),
         per_item=per_item,
     )
 
@@ -130,7 +154,7 @@ def render_table(scorecard: Scorecard) -> str:
 
     lines = [
         f"Retrieval scorecard — {scorecard.generated_at}",
-        f"golden set: {scorecard.golden_set_path}",
+        f"golden set: {scorecard.golden_set_path}  (split: {scorecard.split})",
         f"retriever model: {scorecard.retriever_model}",
         reranked_line,
         f"total items: {scorecard.total_items}  "
@@ -143,7 +167,10 @@ def render_table(scorecard: Scorecard) -> str:
         lines.append("(no scored items — nothing to aggregate)")
         return "\n".join(lines)
 
-    header = f"{'k':>4} | {'recall@k':>10} | {'MRR@k':>10} | {'nDCG@k':>10}"
+    header = (
+        f"{'k':>4} | {'recall@k':>10} | {'MRR@k':>10} | {'nDCG@k':>10} | "
+        f"{'hit@k ⊇':>10} | {'MRR@k ⊇':>10}"
+    )
     lines.append(header)
     lines.append("-" * len(header))
     for k in scorecard.k_values:
@@ -151,8 +178,12 @@ def render_table(scorecard: Scorecard) -> str:
             f"{k:>4} | "
             f"{scorecard.aggregate_recall_at_k[k]:>10.4f} | "
             f"{scorecard.aggregate_mrr_at_k[k]:>10.4f} | "
-            f"{scorecard.aggregate_ndcg_at_k[k]:>10.4f}"
+            f"{scorecard.aggregate_ndcg_at_k[k]:>10.4f} | "
+            f"{scorecard.aggregate_hit_containing_at_k.get(k, 0.0):>10.4f} | "
+            f"{scorecard.aggregate_mrr_containing_at_k.get(k, 0.0):>10.4f}"
         )
+    lines.append("")
+    lines.append("⊇ = a retrieved article/annex chunk containing the labelled paragraph counts")
     return "\n".join(lines)
 
 
