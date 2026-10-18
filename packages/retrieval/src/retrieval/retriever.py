@@ -6,7 +6,7 @@ from pgvector import Vector
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from retrieval.references import referenced_chunk_ids
+from retrieval.references import expand_aliases, referenced_chunk_ids
 
 
 def _build_where_clause(filters: Filters | None) -> tuple[str, dict[str, Any]]:
@@ -60,6 +60,10 @@ _FTS_WEIGHT = 0.5
 # operative provision should outrank the recital or guidance paragraph restating it.
 # Status notes stay at 1.0 — for "has this been amended?" they are often the only source.
 DEFAULT_AUTHORITY_WEIGHTS = {"recital": 0.8, "guidance": 0.7, "status": 1.0}
+# At most this many chunks from any one guidance document in a result. The Commission's
+# Article 5 guidelines alone are 257 chunks; uncapped, an Article 5 question got five
+# guidance paragraphs and not the article itself.
+_MAX_PER_GUIDANCE_DOCUMENT = 2
 
 
 class PgVectorRetriever:
@@ -146,7 +150,7 @@ class PgVectorRetriever:
                 # vector <=> double precision[]" failure.
                 {
                     "query_vector": Vector(query_vector),
-                    "text": query.text,
+                    "text": expand_aliases(query.text),
                     "candidates": max(_CANDIDATES, query.top_k),
                     "rrf_k": _RRF_K,
                     "ts_norm": _TS_NORMALIZATION,
@@ -154,8 +158,8 @@ class PgVectorRetriever:
                     "w_recital": self._weights["recital"],
                     "w_guidance": self._weights["guidance"],
                     "w_status": self._weights["status"],
-                    # Over-fetch: leaves whose parent is also present are dropped below.
-                    "top_k": query.top_k * 2,
+                    # Over-fetch: the dedupe and guidance cap below drop some rows.
+                    "top_k": query.top_k * 3,
                     **where_params,
                 },
             )
@@ -186,7 +190,16 @@ class PgVectorRetriever:
         # returning both spends two of the generator's few context slots on one text.
         present = {sc.chunk.id for sc in merged}
         distinct = [sc for sc in merged if sc.chunk.metadata.get("parent_chunk_id") not in present]
-        return distinct[: query.top_k]
+        per_document: dict[str, int] = {}
+        capped: list[ScoredChunk] = []
+        for sc in distinct:
+            if sc.chunk.metadata.get("authority") == "guidance":
+                seen = per_document.get(sc.chunk.document_id, 0)
+                if seen >= _MAX_PER_GUIDANCE_DOCUMENT:
+                    continue
+                per_document[sc.chunk.document_id] = seen + 1
+            capped.append(sc)
+        return capped[: query.top_k]
 
 
 def _to_scored(row: dict[str, Any], score: float) -> ScoredChunk:

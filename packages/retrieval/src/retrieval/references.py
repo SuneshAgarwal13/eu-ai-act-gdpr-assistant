@@ -18,6 +18,20 @@ _ANNEX_RE = re.compile(r"\bAnnex\s+([IVXL]+)\b(?:,?\s*(?:point|pt\.?)\s*(\d+))?"
 _GDPR_RE = re.compile(r"\bGDPR\b|2016/679|General Data Protection Regulation", re.I)
 _AI_ACT_RE = re.compile(r"\bAI Act\b|2024/1689|Artificial Intelligence Act", re.I)
 _DOCUMENT_NAMES = ((AI_ACT, _AI_ACT_RE), (GDPR, _GDPR_RE))
+# How far after "Article 33" a regulation's name still binds to it ("Article 33 GDPR",
+# "Article 33 of the GDPR", "Article 5(1)(f) of the AI Act").
+_NAMED_AFTER = 25
+# AI Act Article 2(7) is the provision on how the AI Act relates to EU data-protection
+# law ("shall not affect Regulation (EU) 2016/679 ..."). It never says "GDPR" and is a
+# short paragraph, so neither ranking finds it for "does the AI Act override the GDPR?";
+# any question naming both regulations gets it.
+_INTERPLAY_PROVISION = f"{AI_ACT}:article:2:paragraph:7"
+
+
+def _documents_for(match: re.Match[str], text: str, default: list[str]) -> list[str]:
+    following = text[match.end() : match.end() + _NAMED_AFTER]
+    named = [doc for doc, pattern in _DOCUMENT_NAMES if pattern.search(following)]
+    return named[:1] or default
 
 
 def referenced_chunk_ids(text: str) -> list[str]:
@@ -29,14 +43,17 @@ def referenced_chunk_ids(text: str) -> list[str]:
     documents = named or [AI_ACT, GDPR]
 
     ids: dict[str, None] = {}
+    if len(named) == 2:
+        ids[_INTERPLAY_PROVISION] = None
     for match in _ARTICLE_RE.finditer(text):
         article, paragraph = match.group(1).lower(), match.group(2)
-        for doc in documents:
+        # A question naming both regulations still pins "Article 33 GDPR" to the GDPR only.
+        for doc in _documents_for(match, text, documents):
             if paragraph:
                 ids[f"{doc}:article:{article}:paragraph:{paragraph.lower()}"] = None
             ids[f"{doc}:article:{article}"] = None
     for match in _RECITAL_RE.finditer(text):
-        for doc in documents:
+        for doc in _documents_for(match, text, documents):
             ids[f"{doc}:recital:{match.group(1)}"] = None
     for match in _ANNEX_RE.finditer(text):
         annex, point = match.group(1).upper(), match.group(2)
@@ -44,3 +61,17 @@ def referenced_chunk_ids(text: str) -> list[str]:
             ids[f"{AI_ACT}:annex:{annex}:point:{point}"] = None
         ids[f"{AI_ACT}:annex:{annex}"] = None
     return list(ids)
+
+
+# The regulations cite each other by number, never by acronym: AI Act Article 2(7) says
+# "shall not affect Regulation (EU) 2016/679", so a question about "the GDPR" can't
+# match it on words. Appending the formal citation lets full-text search connect them.
+_ALIASES = (
+    (_GDPR_RE, "Regulation (EU) 2016/679"),
+    (_AI_ACT_RE, "Regulation (EU) 2024/1689"),
+)
+
+
+def expand_aliases(text: str) -> str:
+    extra = [formal for pattern, formal in _ALIASES if pattern.search(text) and formal not in text]
+    return " ".join([text, *extra])
