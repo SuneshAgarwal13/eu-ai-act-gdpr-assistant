@@ -154,7 +154,8 @@ class PgVectorRetriever:
                     "w_recital": self._weights["recital"],
                     "w_guidance": self._weights["guidance"],
                     "w_status": self._weights["status"],
-                    "top_k": query.top_k,
+                    # Over-fetch: leaves whose parent is also present are dropped below.
+                    "top_k": query.top_k * 2,
                     **where_params,
                 },
             )
@@ -180,7 +181,12 @@ class PgVectorRetriever:
                 ]
 
         pinned = {sc.chunk.id for sc in explicit}
-        return (explicit + [sc for sc in ranked if sc.chunk.id not in pinned])[: query.top_k]
+        merged = explicit + [sc for sc in ranked if sc.chunk.id not in pinned]
+        # An article (or annex) chunk holds each of its paragraph (point) chunks verbatim;
+        # returning both spends two of the generator's few context slots on one text.
+        present = {sc.chunk.id for sc in merged}
+        distinct = [sc for sc in merged if sc.chunk.metadata.get("parent_chunk_id") not in present]
+        return distinct[: query.top_k]
 
 
 def _to_scored(row: dict[str, Any], score: float) -> ScoredChunk:
