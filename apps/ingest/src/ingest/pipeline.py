@@ -9,6 +9,12 @@ from sentence_transformers import SentenceTransformer
 from ingest.chunks import IngestChunk, build_chunks
 from ingest.documents import DocumentSource
 from ingest.fetch import fetch_document_xhtml
+from ingest.guidance import (
+    GuidanceSource,
+    build_guidance_chunks,
+    extract_pages,
+    fetch_guidance_pdf,
+)
 from ingest.parser import ParsedDocument, parse_document
 from telemetry import get_logger
 
@@ -71,6 +77,37 @@ def _upsert_chunks(
     return len(chunks)
 
 
+def _embed_and_upsert(
+    conn: psycopg.Connection,
+    embedder_model: SentenceTransformer,
+    slug: str,
+    chunks: list[IngestChunk],
+) -> int:
+    if not chunks:
+        return 0
+    vectors = embedder_model.encode([chunk.content for chunk in chunks], normalize_embeddings=True)
+    embeddings = [vector.tolist() for vector in vectors]
+    logger.info("ingest.chunks_embedded", source=slug, chunks=len(embeddings))
+    inserted = _upsert_chunks(conn, chunks, embeddings)
+    logger.info("ingest.chunks_inserted", source=slug, chunks=inserted)
+    return inserted
+
+
+def ingest_guidance(
+    source: GuidanceSource,
+    conn: psycopg.Connection,
+    embedder_model: SentenceTransformer,
+    cache_dir: Path,
+    *,
+    force_refresh: bool = False,
+) -> int:
+    """Fetch -> extract -> chunk -> embed -> upsert one guidance PDF (ingest.guidance)."""
+    pages = extract_pages(fetch_guidance_pdf(source, cache_dir, force_refresh=force_refresh))
+    chunks = build_guidance_chunks(source, pages)
+    logger.info("ingest.chunks_built", source=source.slug, pages=len(pages), chunks=len(chunks))
+    return _embed_and_upsert(conn, embedder_model, source.slug, chunks)
+
+
 def ingest_document(
     source: DocumentSource,
     conn: psycopg.Connection,
@@ -115,18 +152,7 @@ def ingest_document(
 
     chunks = build_chunks(doc)
     logger.info("ingest.chunks_built", source=source.slug, chunks=len(chunks))
-
-    if chunks:
-        vectors = embedder_model.encode(
-            [chunk.content for chunk in chunks], normalize_embeddings=True
-        )
-        embeddings = [vector.tolist() for vector in vectors]
-    else:
-        embeddings = []
-    logger.info("ingest.chunks_embedded", source=source.slug, chunks=len(embeddings))
-
-    inserted = _upsert_chunks(conn, chunks, embeddings) if chunks else 0
-    logger.info("ingest.chunks_inserted", source=source.slug, chunks=inserted)
+    inserted = _embed_and_upsert(conn, embedder_model, source.slug, chunks)
 
     return IngestStats(
         articles=len(doc.articles),
