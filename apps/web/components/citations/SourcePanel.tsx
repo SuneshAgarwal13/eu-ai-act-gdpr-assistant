@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import { motion } from "motion/react";
 
-import { citationLabel, splitChunkText, type CitedChunk } from "@/lib/citations";
+import { citationLabel, provenance, splitChunkText, type CitedChunk } from "@/lib/citations";
 
 interface SourcePanelProps {
   chunkId: string;
@@ -20,6 +20,7 @@ export function SourcePanel({ chunkId, chunk, onClose, reduceMotion }: SourcePan
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const label = citationLabel(chunk.metadata);
   const { header, body } = splitChunkText(chunk.text, label);
+  const source = provenance(chunk.metadata);
 
   useEffect(() => {
     closeButtonRef.current?.focus();
@@ -57,6 +58,17 @@ export function SourcePanel({ chunkId, chunk, onClose, reduceMotion }: SourcePan
           <div>
             <p className="text-citation font-mono text-sm">{label}</p>
             {header && header !== label && <p className="text-ink/60 mt-0.5 font-mono text-[11px]">{header}</p>}
+            <p className="text-ink/60 mt-1.5 font-mono text-[11px]">{source.note}</p>
+            {source.url && (
+              <a
+                href={source.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-citation mt-1 inline-block font-mono text-[11px] hover:underline"
+              >
+                {source.kind === "law" ? "Read on EUR-Lex ↗" : "Open the source ↗"}
+              </a>
+            )}
           </div>
           <button
             ref={closeButtonRef}

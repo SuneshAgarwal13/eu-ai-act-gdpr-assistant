@@ -13,6 +13,20 @@ export interface StreamQueryRequest {
  * FRONTEND_ORIGIN. */
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+let warmedUp = false;
+
+/** The API scales to zero, and a cold start takes the better part of a minute. Pinging
+ * /health when the landing page mounts starts the instance while the visitor is still
+ * reading, so their first question meets a warm backend. `no-cors`: only the request has
+ * to arrive — the response is never read, so no CORS headers are needed. */
+export function warmUpBackend(): void {
+  if (warmedUp) return;
+  warmedUp = true;
+  fetch(`${API_BASE_URL}/health`, { mode: "no-cors", cache: "no-store" }).catch(() => {
+    // A failed warm-up is harmless: the real query reports its own error.
+  });
+}
+
 /**
  * POSTs to /query/stream and yields typed GraphEvents as they arrive. Hand-rolled
  * because EventSource can't send a POST body and the AI SDK's stream reader expects its
