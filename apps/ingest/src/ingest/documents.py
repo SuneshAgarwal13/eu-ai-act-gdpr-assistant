@@ -13,6 +13,13 @@ class DocumentSource:
     celex_id: str
     eli_uri: str
 
+    def eurlex_url(self, anchor: str) -> str:
+        """Human-readable EUR-Lex page for this instrument, scrolled to `anchor` — the
+        same element ids the parser keys on ("art_50", "rct_44", "anx_III"). Browsers
+        get through EUR-Lex's WAF; only scripted clients are blocked."""
+        path = self.eli_uri.removeprefix("http://data.europa.eu/eli/")
+        return f"https://eur-lex.europa.eu/eli/{path}/eng#{anchor}"
+
 
 DOCUMENTS: list[DocumentSource] = [
     DocumentSource(

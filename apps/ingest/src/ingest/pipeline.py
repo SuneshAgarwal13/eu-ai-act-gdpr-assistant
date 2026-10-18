@@ -30,6 +30,7 @@ def _truncate(doc: ParsedDocument, max_items: int | None) -> ParsedDocument:
         source=doc.source,
         articles=doc.articles[:max_items],
         recitals=doc.recitals[:max_items],
+        annexes=doc.annexes[:max_items],
     )
 
 
@@ -81,6 +82,7 @@ def ingest_document(
         source=source.slug,
         articles=len(doc.articles),
         recitals=len(doc.recitals),
+        annexes=len(doc.annexes),
     )
 
     chunks = build_chunks(doc)

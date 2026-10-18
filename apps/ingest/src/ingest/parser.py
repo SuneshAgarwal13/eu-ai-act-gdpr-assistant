@@ -12,6 +12,12 @@ _SECTION_ID_RE = re.compile(r"^cpt_[IVXLCDM]+\.sct_(\d+)$")
 _ARTICLE_ID_RE = re.compile(r"^art_(\d+)$")
 _RECITAL_ID_RE = re.compile(r"^rct_(\d+)$")
 _ARTICLE_PARAGRAPH_ID_RE = re.compile(r"^(\d+)\.(\d+)$")
+_ANNEX_ID_RE = re.compile(r"^anx_([IVXLCDM]+)$")
+# Annex headings come in two shapes: "Section A — ..." (Annexes I, VIII, XI) and
+# "3. Quality management system" (Annexes VII, X). Either names the block below it.
+_ANNEX_HEADING_KEY_RE = re.compile(r"^(?:Section\s+([A-Z0-9]+)\b|(\d+)\.)")
+_ANNEX_ITEM_LABEL_RE = re.compile(r"^\(?([0-9]+(?:\.[0-9]+)*|[a-z])\)?\.?$")
+_LEADING_NUMBER_RE = re.compile(r"^(\d+(?:\.\d+)*)\.\s")
 
 
 @dataclass(frozen=True)
@@ -53,10 +59,35 @@ class Recital:
 
 
 @dataclass(frozen=True)
+class AnnexItem:
+    """One citable block of an annex: a numbered point ("5", "3.1", "A.2", "1(a)") or a
+    headed paragraph block. `key` is how a practitioner would cite it."""
+
+    key: str
+    heading: str | None
+    text: str
+
+
+@dataclass(frozen=True)
+class Annex:
+    number: str
+    title: str
+    intro: str
+    items: list[AnnexItem] = field(default_factory=list)
+
+    @property
+    def full_text(self) -> str:
+        parts = [self.intro] if self.intro else []
+        parts.extend(item.text for item in self.items)
+        return "\n".join(parts)
+
+
+@dataclass(frozen=True)
 class ParsedDocument:
     source: DocumentSource
     articles: list[Article] = field(default_factory=list)
     recitals: list[Recital] = field(default_factory=list)
+    annexes: list[Annex] = field(default_factory=list)
 
 
 def _text(tag: Tag | None) -> str:
@@ -116,16 +147,118 @@ def _parse_article_paragraphs(article_div: Tag, article_number: str) -> list[Par
     return [_paragraph_from_container(article_div, None)]
 
 
+def _annex_item_key(label: str, heading_key: str | None, heading_is_section: bool) -> str:
+    """"5" under no heading -> "5"; "1" under "Section A" -> "A.1"; "(a)" under "1." ->
+    "1(a)"; "3.1" under "3." -> "3.1" (the label already carries the heading)."""
+    match = _ANNEX_ITEM_LABEL_RE.match(label)
+    core = match.group(1) if match else label
+    if heading_key is None:
+        return core
+    if core.isalpha():
+        return f"{heading_key}({core})"
+    if heading_is_section:
+        return f"{heading_key}.{core}"
+    return core
+
+
+def _parse_annex(div: Tag, number: str) -> Annex:
+    """Annexes have no per-point ids, and their layout varies: numbered <table>s
+    (most), <div class="oj-enumeration-spacing"> items (Annex VI), and headed blocks of
+    plain paragraphs (Annexes VII, X). One walk over the direct children handles all
+    three: track the current heading, emit one item per numbered element, and fold
+    plain paragraphs under a heading into one item keyed by that heading."""
+    titles = div.find_all("p", class_="oj-doc-ti", recursive=False)
+    title = _text(titles[1]) if len(titles) > 1 else ""
+
+    intro_parts: list[str] = []
+    items: list[AnnexItem] = []
+    heading: str | None = None
+    heading_key: str | None = None
+    heading_is_section = False
+    pending: list[str] = []  # plain paragraphs under the current heading
+    seen: dict[str, int] = {}
+    position = 0  # items under the current heading, for unnumbered lists (Annex II)
+
+    def add(key: str, text: str) -> None:
+        # Keys are unique within an annex; a repeat (rare drafting quirk) gets a suffix
+        # rather than overwriting its sibling.
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] > 1:
+            key = f"{key}-{seen[key]}"
+        items.append(AnnexItem(key=key, heading=heading, text=text))
+
+    def flush_pending() -> None:
+        if pending:
+            # "3. Overview" names its own block; "Section A" paragraphs introduce the
+            # points numbered A.1, A.2, ... so they get their own key.
+            if heading_key is None:
+                key = "intro"
+            else:
+                key = f"{heading_key}.intro" if heading_is_section else heading_key
+            add(key, " ".join(pending))
+            pending.clear()
+
+    def item_label(label: str, text: str) -> str:
+        # The number sits in the first cell, or (spacer first cell) at the start of the
+        # text; failing both it is a bullet list, numbered by position.
+        if _ANNEX_ITEM_LABEL_RE.match(label):
+            return label
+        match = _LEADING_NUMBER_RE.match(text)
+        return match.group(1) if match else str(position)
+
+    for child in div.find_all(recursive=False):
+        classes = child.get("class") or []
+        if child.name == "p" and "oj-doc-ti" in classes:
+            continue
+        if child.name == "p" and "oj-ti-grseq-1" in classes:
+            text = _text(child)
+            match = _ANNEX_HEADING_KEY_RE.match(text)
+            if match:
+                flush_pending()
+                heading = text
+                heading_key = match.group(1) or match.group(2)
+                heading_is_section = match.group(1) is not None
+                position = 0
+            elif heading is not None:
+                # A second heading line titles the first ("Section 2" + "Additional
+                # information to be provided by ...").
+                heading = f"{heading} — {text}"
+            continue
+        if child.name == "table":
+            cells = child.find_all("td")
+            if len(cells) >= 2:
+                position += 1
+                label = item_label(_text(cells[0]), _text(child))
+                add(_annex_item_key(label, heading_key, heading_is_section), _text(child))
+            continue
+        if child.name == "div" and "oj-enumeration-spacing" in classes:
+            position += 1
+            text = _text(child)
+            label = item_label("", text)
+            add(_annex_item_key(label, heading_key, heading_is_section), text)
+            continue
+        if child.name == "p":
+            text = _text(child)
+            if heading is None:
+                intro_parts.append(text)
+            else:
+                pending.append(text)
+    flush_pending()
+
+    return Annex(number=number, title=title, intro=" ".join(intro_parts), items=items)
+
+
 def parse_document(xhtml: str, source: DocumentSource) -> ParsedDocument:
     """Parses ELI-compliant XHTML (as served by the CELLAR API — see fetch.py)
     preserving Chapter -> Section -> Article -> Paragraph -> Point nesting, plus
-    Recitals collected separately. Walks every <div id="..."> in document order,
+    Recitals and Annexes collected separately. Walks every <div id="..."> in document order,
     tracking current chapter/section as state — a flat preorder scan is sufficient
     since chapter/section divs always appear before the articles they contain."""
     soup = BeautifulSoup(xhtml, "lxml-xml")
 
     articles: list[Article] = []
     recitals: list[Recital] = []
+    annexes: list[Annex] = []
 
     current_chapter_number: str | None = None
     current_chapter_title: str | None = None
@@ -163,5 +296,7 @@ def parse_document(xhtml: str, source: DocumentSource) -> ParsedDocument:
             points = _parse_points(div)
             text = points[0].text if points else _text(div)
             recitals.append(Recital(number=number, text=text))
+        elif annex_match := _ANNEX_ID_RE.match(div_id):
+            annexes.append(_parse_annex(div, annex_match.group(1)))
 
-    return ParsedDocument(source=source, articles=articles, recitals=recitals)
+    return ParsedDocument(source=source, articles=articles, recitals=recitals, annexes=annexes)
